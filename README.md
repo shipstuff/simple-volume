@@ -5,6 +5,23 @@ Applications use normal PVCs backed by the `simple-volume.shipstuff.io` CSI
 driver. The controller and node agents handle the local replica lifecycle,
 freshness policy, and promotion state.
 
+## Why
+
+We want local-disk performance for workloads such as game servers while still
+having a Kubernetes-native recovery path when a node fails. Existing storage
+options did not match that shape cleanly: VolSync is useful as a copy primitive
+but does not own promotion or scheduling policy, Longhorn is a broader
+replicated block-storage layer, and OpenEBS/Ceph add more storage-platform
+surface than this use case needs.
+
+`simple-volume` keeps the hot path local, uses PVC/CSI so applications do not
+mount raw `hostPath`, replicates selected durable paths asynchronously, and
+promotes only replicas that are fresh enough for the workload's RPO. See
+[docs/why-simple-volume.md](docs/why-simple-volume.md) for the full design
+rationale, replication model, and storage options we evaluated.
+
+## V0 Scope
+
 The V0 scope is intentionally narrow:
 
 - dynamic PVC provisioning into logical SimpleVolumes
@@ -16,9 +33,6 @@ The V0 scope is intentionally narrow:
 
 Replication logic does not run inside CSI. CSI is the Kubernetes mount boundary;
 the controller owns policy and the node agent owns local filesystem operations.
-
-See [docs/why-simple-volume.md](docs/why-simple-volume.md) for the design
-rationale, replication model, and storage options we evaluated.
 
 ## Replication Model
 
