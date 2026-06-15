@@ -9,10 +9,13 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/shipstuff/simple-volume/internal/agent"
 	"github.com/shipstuff/simple-volume/internal/api/v1alpha1"
+	simplecontroller "github.com/shipstuff/simple-volume/internal/controller"
 	simplecsi "github.com/shipstuff/simple-volume/internal/csi"
 )
 
@@ -39,9 +42,31 @@ func main() {
 func runController(args []string) {
 	fs := flag.NewFlagSet("controller", flag.ExitOnError)
 	addr := fs.String("http", ":8080", "health and metrics listen address")
+	enableReplication := fs.Bool("enable-replication-controller", getenv("SIMPLE_VOLUME_ENABLE_REPLICATION_CONTROLLER", "true") == "true", "reconcile annotated PVC replication watches")
+	namespace := fs.String("namespace", getenv("POD_NAMESPACE", "simple-volume-system"), "namespace containing simple-volume controller resources")
+	storageClass := fs.String("storage-class", getenv("SIMPLE_VOLUME_STORAGE_CLASS", "simple-volume"), "storage class to reconcile")
+	tokenSecretName := fs.String("sync-token-secret-name", getenv("SIMPLE_VOLUME_TOKEN_SECRET_NAME", "simple-volume-sync-token"), "secret containing the agent sync token")
+	tokenSecretKey := fs.String("sync-token-secret-key", getenv("SIMPLE_VOLUME_TOKEN_SECRET_KEY", "token"), "secret key containing the agent sync token")
+	reconcileInterval := fs.Duration("reconcile-interval", 30*time.Second, "replication reconcile interval")
 	_ = fs.Parse(args)
-	log.Printf("starting simple-volume controller scaffold driver=%s addr=%s", v1alpha1.DriverName, *addr)
-	serveHealth(*addr)
+	log.Printf("starting simple-volume controller driver=%s addr=%s replication=%t", v1alpha1.DriverName, *addr, *enableReplication)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	go serveHealth(*addr)
+	if !*enableReplication {
+		<-ctx.Done()
+		return
+	}
+	err := simplecontroller.RunReplicationController(ctx, simplecontroller.ReplicationControllerConfig{
+		Namespace:         *namespace,
+		StorageClassName:  *storageClass,
+		TokenSecretName:   *tokenSecretName,
+		TokenSecretKey:    *tokenSecretKey,
+		ReconcileInterval: *reconcileInterval,
+	})
+	if err != nil && err != context.Canceled {
+		log.Fatalf("replication controller: %v", err)
+	}
 }
 
 func runAgent(args []string) {

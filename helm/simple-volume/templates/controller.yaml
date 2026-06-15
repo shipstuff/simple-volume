@@ -26,7 +26,18 @@ spec:
         - name: controller
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          args: ["controller"]
+          args:
+            - controller
+            - --enable-replication-controller={{ .Values.controller.replicationController.enabled }}
+            - --storage-class={{ .Values.storageClass.name }}
+            - --sync-token-secret-name={{ .Values.sync.tokenSecretName }}
+            - --sync-token-secret-key={{ .Values.sync.tokenSecretKey }}
+            - --reconcile-interval={{ .Values.controller.replicationController.reconcileInterval }}
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
           ports:
             - name: http
               containerPort: 8080

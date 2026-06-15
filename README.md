@@ -69,6 +69,26 @@ Example start request:
 }
 ```
 
+The controller reconciles this same behavior for annotated PVCs. For V0 it
+discovers the active/source node from the running pod that mounts the claim,
+uses all other ready node-agent pods as replicas, starts the source watch, and
+optionally runs a scoped full sync against each replica.
+
+```yaml
+metadata:
+  annotations:
+    simple-volume.shipstuff.io/replication-enabled: "true"
+    simple-volume.shipstuff.io/replication-include-paths: "writes.log,saves/**"
+    simple-volume.shipstuff.io/replication-exclude-paths: "downloads/**"
+    simple-volume.shipstuff.io/replication-debounce: "2s"
+    simple-volume.shipstuff.io/replication-full-sync-on-start: "true"
+    simple-volume.shipstuff.io/replication-full-sync-schedule: "0 4 * * *"
+```
+
+The current schedule parser intentionally supports exact minute/hour cron
+windows such as `0 4 * * *`; ranges and step expressions are left for the
+controller-runtime implementation.
+
 ## Development
 
 ```bash
