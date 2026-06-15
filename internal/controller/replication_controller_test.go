@@ -76,18 +76,22 @@ func TestDesiredReplicationsDiscoversActiveAndReplicaAgents(t *testing.T) {
 func TestReconcileOneStartsWatchAndRunsStartupFullSyncOnce(t *testing.T) {
 	var watchStarts int
 	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/replication/watch/start" {
+		switch r.URL.Path {
+		case "/replication/watch/start":
+			watchStarts++
+			var req agent.WatchStartRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode watch request: %v", err)
+			}
+			if req.Volume != "pvc-123" || len(req.Targets) != 2 {
+				t.Fatalf("watch request = %#v", req)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+		case "/replication/watch/status":
+			_ = json.NewEncoder(w).Encode(map[string]bool{"running": true})
+		default:
 			t.Fatalf("source path = %s", r.URL.Path)
 		}
-		watchStarts++
-		var req agent.WatchStartRequest
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			t.Fatalf("decode watch request: %v", err)
-		}
-		if req.Volume != "pvc-123" || len(req.Targets) != 2 {
-			t.Fatalf("watch request = %#v", req)
-		}
-		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 	}))
 	defer source.Close()
 

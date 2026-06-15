@@ -8,6 +8,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -221,6 +222,15 @@ func (c *ReplicationController) reconcileOne(ctx context.Context, desired Desire
 	c.mu.Lock()
 	alreadyStarted := c.startedWatches[key] == signature
 	c.mu.Unlock()
+	if alreadyStarted {
+		running, err := c.watchRunning(ctx, desired, token)
+		if err != nil {
+			log.Printf("check replication watch namespace=%s claim=%s volume=%s: %v", desired.Namespace, desired.ClaimName, desired.Volume, err)
+			alreadyStarted = false
+		} else if !running {
+			alreadyStarted = false
+		}
+	}
 	if !alreadyStarted {
 		if err := c.startWatch(ctx, desired, token); err != nil {
 			return err
@@ -280,6 +290,35 @@ func (c *ReplicationController) startWatch(ctx context.Context, desired DesiredR
 		Debounce:     desired.Debounce,
 	}
 	return c.postJSON(ctx, strings.TrimRight(agentHTTPURLFromWebDAV(desired.SourceURL), "/")+"/replication/watch/start", token, req)
+}
+
+func (c *ReplicationController) watchRunning(ctx context.Context, desired DesiredReplication, token string) (bool, error) {
+	statusURL := strings.TrimRight(agentHTTPURLFromWebDAV(desired.SourceURL), "/") +
+		"/replication/watch/status?namespace=" + url.QueryEscape(desired.Namespace) + "&volume=" + url.QueryEscape(desired.Volume)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, statusURL, nil)
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return false, nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return false, fmt.Errorf("%s returned %s: %s", statusURL, resp.Status, strings.TrimSpace(string(responseBody)))
+	}
+	var status struct {
+		Running bool `json:"running"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		return false, err
+	}
+	return status.Running, nil
 }
 
 func (c *ReplicationController) fullSyncTargets(ctx context.Context, desired DesiredReplication, token string) error {
