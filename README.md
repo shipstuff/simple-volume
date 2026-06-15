@@ -64,6 +64,13 @@ Volumes can replicate only selected folders/files. For game servers, this keeps
 large reconstructable game downloads out of the hot replication path while still
 protecting save/config state.
 
+The operator chooses the storage-capable node set when installing the chart by
+scheduling the node-agent DaemonSet with normal Kubernetes selectors, affinity,
+and tolerations. Workloads that consume `simple-volume` storage should also
+declare matching scheduling intent in their own manifests. `simple-volume` owns
+the per-volume active/fresh labels, but it should not depend on a mutating
+admission webhook to make unrelated workload charts schedulable.
+
 The node agent exposes the V0 watch control surface used by the controller and
 manual E2E validation:
 
@@ -152,6 +159,10 @@ state while avoiding split-brain.
 The next promotion pass should add operator preference and lightweight resource
 awareness without trying to reimplement the Kubernetes scheduler:
 
+- keep storage pool membership operator-defined through the node-agent
+  DaemonSet placement
+- require consuming workloads to carry the appropriate storage-pool or
+  per-volume scheduling selectors/affinity in their own manifests
 - accept a failover priority list such as
   ```yaml
   simple-volume.shipstuff.io/failover-node-priority: "fresno-west-1,sf-west-1,kapolei-pacific-1"
@@ -165,6 +176,8 @@ awareness without trying to reimplement the Kubernetes scheduler:
 - if Kubernetes still leaves the replacement pod Pending, retry the next
   eligible replica rather than treating CSI mount failure as the promotion
   trigger
+- avoid mutating admission webhooks for v1; explicit workload scheduling is
+  easier to reason about and keeps adoption visible in the app chart
 
 ## Development
 

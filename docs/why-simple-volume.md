@@ -62,6 +62,12 @@ The default replica set is the set of healthy node-agent DaemonSet pods for the
 configured storage pool. Per-volume node constraints can be added later, but
 v0 should not require manually maintaining a node list for every volume.
 
+Storage pool membership is operator-defined at install time through the
+node-agent DaemonSet's node selectors, affinity, and tolerations. Workloads that
+use a `simple-volume` PVC should carry compatible scheduling labels or affinity
+in their own manifests. That keeps adoption explicit in the app chart instead
+of relying on a mutating admission webhook to infer and patch scheduling rules.
+
 ## What This Is Not
 
 `simple-volume` is not:
@@ -122,6 +128,8 @@ fresh replicas, but within that eligible set it can prefer operator-specified
 nodes first, then fall back to the current freshest-replica selection. Kubernetes
 should remain the final scheduler; `simple-volume` should avoid using CSI mount
 failures as the normal way to discover that a node cannot run the workload.
+Explicit workload selectors/affinity should be the default adoption path;
+webhook-based injection can wait until there is a clear need.
 
 ## Storage Options Evaluated
 

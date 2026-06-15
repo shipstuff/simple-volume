@@ -47,6 +47,9 @@ host filesystem enforces its own limits.
 
 - Eligible nodes default to healthy node-agent pods for the requested pool.
 - Per-volume node restrictions are optional and additive, via selectors or explicit constraints, not required for V0.
+- Workloads that consume `simple-volume` should declare compatible storage-pool
+  or per-volume scheduling selectors/affinity in their own manifests. Admission
+  webhook injection is not part of the default adoption model.
 
 ## Implementation
 
@@ -156,6 +159,10 @@ host filesystem enforces its own limits.
 ## Next Revision
 
 - Add a failover node priority annotation or spec field.
+- Keep storage pool membership defined by node-agent DaemonSet placement at
+  install time.
+- Keep workload adoption explicit: consuming charts should carry the matching
+  storage-pool or per-volume scheduling selectors/affinity.
 - Select the first preferred node that is a healthy, fresh replica on a Ready
   and schedulable node.
 - Fall back to the current freshest-replica behavior if no preferred node is
@@ -166,3 +173,5 @@ host filesystem enforces its own limits.
 - Keep Kubernetes as the final scheduling authority. If the replacement pod
   stays Pending after promotion, the controller can retry another eligible
   replica; CSI mount failure should not be the normal promotion trigger.
+- Do not add a mutating admission webhook in the next revision unless explicit
+  selectors become too burdensome across real workloads.
