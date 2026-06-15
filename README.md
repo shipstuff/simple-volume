@@ -36,6 +36,37 @@ Volumes can replicate only selected folders/files. For game servers, this keeps
 large reconstructable game downloads out of the hot replication path while still
 protecting save/config state.
 
+The node agent exposes the V0 watch control surface used by the controller and
+manual E2E validation:
+
+- `POST /replication/watch/start` starts or replaces an active watch for a
+  volume and pushes event batches to replica agents.
+- `POST /replication/watch/stop` stops a running watch.
+- `GET /replication/watch/status` lists active and stopped watches.
+- `POST /replication/sync-batch` receives a batch on a replica and pulls changed
+  files from the source agent's WebDAV endpoint.
+
+Example start request:
+
+```json
+{
+  "namespace": "default",
+  "volume": "pvc-1234",
+  "source": {
+    "webdavUrl": "http://10.233.1.10:8081"
+  },
+  "targets": [
+    {
+      "url": "http://10.233.1.11:8080",
+      "token": "change-me"
+    }
+  ],
+  "includePaths": ["saves/**", "server.json"],
+  "excludePaths": ["downloads/**"],
+  "debounce": "5s"
+}
+```
+
 ## Development
 
 ```bash
