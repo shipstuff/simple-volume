@@ -114,10 +114,10 @@ bound.
 | Option | Decision | Reason |
 | --- | --- | --- |
 | VolSync | Tried as a PVC copy primitive, not selected as the main abstraction. | VolSync can copy PVC data, but it does not provide the freshness-aware promotion, fencing, active-node scheduling, or single-writer policy this project needs. |
-| Longhorn | Tried as a general replicated storage layer, not selected for these workloads. | Longhorn solves a broader replicated block-storage problem. Our target is local hot writes with async recovery, not a synchronous storage platform in the hot path. |
-| OpenEBS | Ruled out before POC. | LocalPV still leaves us to build promotion/freshness/rescheduling policy, while replicated OpenEBS engines add another storage platform to operate. |
+| Longhorn | Strongest tested alternative, but not selected for these workloads. | Longhorn solves a broader replicated block-storage problem, but it added many containers to already resource-constrained nodes. Our target is local hot writes with async recovery, not a heavier synchronous storage platform in the hot path. |
+| OpenEBS | Ruled out before POC. | LocalPV still leaves us to build promotion/freshness/rescheduling policy, while replicated OpenEBS engines add another storage platform to operate. For this use case, most of that surface area is overkill. |
 | Ceph/Rook | Ruled out before POC. | Ceph solves distributed storage, but the operational footprint is too high for this use case and it moves game/runtime state into a general cluster storage layer. |
-| `simple-volume` | Selected v0 direction. | It keeps the hot path local, uses PVC/CSI for Kubernetes integration, delegates byte movement to rclone/WebDAV agents, and makes freshness-gated promotion explicit. |
+| `simple-volume` | Selected v0 direction. | It keeps the hot path local, uses PVC/CSI for Kubernetes integration, delegates byte movement to rclone/WebDAV agents, and makes freshness-gated promotion explicit. The model is ongoing backup plus automatic failover to the freshest acceptable copy on another node, which is lightweight and covers the fundamental recovery features for many single-writer workloads. |
 
 ## Workloads That Fit
 
