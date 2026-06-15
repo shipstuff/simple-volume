@@ -27,6 +27,8 @@ The intended V0 replication path is watch-driven:
 - replica agents receive batch sync requests
 - replica agents pull changed files from the active agent's read-only rclone
   WebDAV endpoint
+- the WebDAV server uses a short directory cache so newly written files are
+  visible to watch-triggered pulls
 - an off-hours full resync schedule, such as `0 4 * * *`, provides a safety net
   for missed events or agent restarts
 

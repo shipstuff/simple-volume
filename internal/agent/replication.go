@@ -123,7 +123,7 @@ func CoalesceEvents(events []FileEvent, filter PathFilter) []FileEvent {
 }
 
 func BuildRcloneServeWebDAVCommand(rootPath, addr string, readOnly bool) CommandSpec {
-	args := []string{"serve", "webdav", rootPath, "--addr", addr}
+	args := []string{"serve", "webdav", rootPath, "--addr", addr, "--dir-cache-time", "1s"}
 	if readOnly {
 		args = append(args, "--read-only")
 	}
