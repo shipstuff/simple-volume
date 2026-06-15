@@ -40,6 +40,14 @@ type SourceRef struct {
 	Password  string `json:"password,omitempty"`
 }
 
+type FullSyncRequest struct {
+	Namespace    string    `json:"namespace,omitempty"`
+	Volume       string    `json:"volume"`
+	Source       SourceRef `json:"source"`
+	IncludePaths []string  `json:"includePaths,omitempty"`
+	ExcludePaths []string  `json:"excludePaths,omitempty"`
+}
+
 type PathFilter struct {
 	IncludePaths []string
 	ExcludePaths []string
@@ -203,6 +211,32 @@ func ApplyEventBatch(ctx context.Context, runner Runner, pool Pool, batch EventB
 	return nil
 }
 
+func ApplyFullSync(ctx context.Context, runner Runner, pool Pool, req FullSyncRequest) error {
+	if runner == nil {
+		runner = ExecRunner{}
+	}
+	if req.Volume == "" {
+		return fmt.Errorf("volume is required")
+	}
+	if req.Source.WebDAVURL == "" {
+		return fmt.Errorf("source.webdavUrl is required")
+	}
+	targetRoot, err := EnsureVolumePath(VolumePath{
+		Pool:      pool,
+		Namespace: req.Namespace,
+		Name:      req.Volume,
+	}, 0o755)
+	if err != nil {
+		return err
+	}
+	sourceVolume := path.Join(safeSegment(req.Namespace), safeSegment(req.Volume))
+	spec := BuildRcloneFullSyncCommand(req.Source, sourceVolume, targetRoot, PathFilter{
+		IncludePaths: req.IncludePaths,
+		ExcludePaths: req.ExcludePaths,
+	})
+	return runner.Run(ctx, spec)
+}
+
 func SyncBatchHandler(pool Pool, auth TokenAuthorizer, runner Runner, timeout time.Duration) http.HandlerFunc {
 	if runner == nil {
 		runner = ExecRunner{}
@@ -233,6 +267,40 @@ func SyncBatchHandler(pool Pool, auth TokenAuthorizer, runner Runner, timeout ti
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"volume": batch.Volume,
 			"events": len(batch.Events),
+			"ok":     true,
+		})
+	}
+}
+
+func FullSyncHandler(pool Pool, auth TokenAuthorizer, runner Runner, timeout time.Duration) http.HandlerFunc {
+	if runner == nil {
+		runner = ExecRunner{}
+	}
+	if timeout <= 0 {
+		timeout = time.Hour
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		if !auth.Authorize(r) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		var req FullSyncRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), timeout)
+		defer cancel()
+		if err := ApplyFullSync(ctx, runner, pool, req); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"volume": req.Volume,
 			"ok":     true,
 		})
 	}

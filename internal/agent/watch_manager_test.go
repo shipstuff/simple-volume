@@ -62,12 +62,20 @@ func TestWatchManagerSendsWatchedBatches(t *testing.T) {
 		t.Fatal("timed out waiting for sent batch")
 	}
 
-	watchStatus, ok := manager.Status("default", "demo")
-	if !ok {
-		t.Fatal("watch status not found")
-	}
-	if watchStatus.DeliveredBatchCount != 1 {
-		t.Fatalf("DeliveredBatchCount = %d, want 1", watchStatus.DeliveredBatchCount)
+	deadline := time.After(3 * time.Second)
+	for {
+		watchStatus, ok := manager.Status("default", "demo")
+		if !ok {
+			t.Fatal("watch status not found")
+		}
+		if watchStatus.DeliveredBatchCount == 1 {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("DeliveredBatchCount = %d, want 1", watchStatus.DeliveredBatchCount)
+		case <-time.After(10 * time.Millisecond):
+		}
 	}
 }
 

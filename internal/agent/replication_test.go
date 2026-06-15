@@ -100,6 +100,41 @@ func TestApplyEventBatchRunsCopyAndDelete(t *testing.T) {
 	}
 }
 
+func TestApplyFullSyncRunsScopedRcloneSync(t *testing.T) {
+	dir := t.TempDir()
+	pool := Pool{Name: "default", Path: dir}
+	if err := EnsurePool(pool, false); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{}
+	err := ApplyFullSync(context.Background(), runner, pool, FullSyncRequest{
+		Namespace:    "default",
+		Volume:       "demo",
+		Source:       SourceRef{WebDAVURL: "http://source:8081"},
+		IncludePaths: []string{"saves/**", "server.json"},
+		ExcludePaths: []string{"downloads/**"},
+	})
+	if err != nil {
+		t.Fatalf("ApplyFullSync returned error: %v", err)
+	}
+	if len(runner.specs) != 1 {
+		t.Fatalf("ran %d commands, want 1", len(runner.specs))
+	}
+	spec := runner.specs[0]
+	if spec.Name != "rclone" {
+		t.Fatalf("name = %q", spec.Name)
+	}
+	if spec.Args[0] != "sync" {
+		t.Fatalf("args = %#v", spec.Args)
+	}
+	if got := spec.Args[len(spec.Args)-2]; got != ":webdav:default/demo" {
+		t.Fatalf("source = %q; args=%#v", got, spec.Args)
+	}
+	if got := spec.Args[len(spec.Args)-1]; got != filepath.Join(dir, "default", "demo") {
+		t.Fatalf("target = %q; args=%#v", got, spec.Args)
+	}
+}
+
 func writeFile(path, content string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err

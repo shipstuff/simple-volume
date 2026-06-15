@@ -104,6 +104,7 @@ func runAgent(args []string) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"path": path})
 	})
 	mux.HandleFunc("/replication/sync-batch", agent.SyncBatchHandler(pool, auth, agent.ExecRunner{}, 10*time.Minute))
+	mux.HandleFunc("/replication/full-sync", agent.FullSyncHandler(pool, auth, agent.ExecRunner{}, time.Hour))
 	mux.HandleFunc("/replication/watch/start", watchManager.StartHandler(auth))
 	mux.HandleFunc("/replication/watch/stop", watchManager.StopHandler(auth))
 	mux.HandleFunc("/replication/watch/status", watchManager.StatusHandler(auth))

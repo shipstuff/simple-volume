@@ -45,6 +45,8 @@ manual E2E validation:
 - `GET /replication/watch/status` lists active and stopped watches.
 - `POST /replication/sync-batch` receives a batch on a replica and pulls changed
   files from the source agent's WebDAV endpoint.
+- `POST /replication/full-sync` runs a scoped `rclone sync` from the source
+  WebDAV endpoint into the local replica path.
 
 Example start request:
 
