@@ -1,0 +1,86 @@
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: simplevolumes.storage.shipstuff.io
+spec:
+  group: storage.shipstuff.io
+  scope: Namespaced
+  names:
+    plural: simplevolumes
+    singular: simplevolume
+    kind: SimpleVolume
+    shortNames:
+      - sv
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                storagePool:
+                  type: string
+                sizeBytes:
+                  type: integer
+                  format: int64
+                replica:
+                  type: object
+                  properties:
+                    method:
+                      type: string
+                      enum: ["rsync", "rclone"]
+                    excludes:
+                      type: array
+                      items:
+                        type: string
+                    replicaCount:
+                      type: integer
+                promotion:
+                  type: object
+                  properties:
+                    automatic:
+                      type: boolean
+                    maxStaleness:
+                      type: string
+                    notReadyGracePeriod:
+                      type: string
+                    activeAgentHeartbeatTimeout:
+                      type: string
+                    promotionDeadline:
+                      type: string
+                access:
+                  type: object
+                  properties:
+                    tokenSecretName:
+                      type: string
+                    tokenSecretKey:
+                      type: string
+                workloadRef:
+                  type: object
+                  properties:
+                    apiVersion:
+                      type: string
+                    kind:
+                      type: string
+                    name:
+                      type: string
+                constraints:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+            status:
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Active
+          type: string
+          jsonPath: .status.activeNode
+

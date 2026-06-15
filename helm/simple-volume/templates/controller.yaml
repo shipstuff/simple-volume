@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "simple-volume.fullname" . }}-controller
+  namespace: {{ include "simple-volume.namespace" . }}
+  labels:
+    app.kubernetes.io/name: {{ include "simple-volume.name" . }}
+    app.kubernetes.io/component: controller
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  replicas: {{ .Values.controller.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "simple-volume.name" . }}
+      app.kubernetes.io/component: controller
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "simple-volume.name" . }}
+        app.kubernetes.io/component: controller
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      serviceAccountName: {{ include "simple-volume.serviceAccountName" . }}
+      containers:
+        - name: controller
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["controller"]
+          ports:
+            - name: http
+              containerPort: 8080
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+          resources:
+            {{- toYaml .Values.controller.resources | nindent 12 }}
+        - name: csi-controller
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - csi-controller
+            - --endpoint=unix:///csi/csi.sock
+            - --pool-name={{ (index .Values.storagePools 0).name }}
+          volumeMounts:
+            - name: csi-socket
+              mountPath: /csi
+          resources:
+            {{- toYaml .Values.controller.resources | nindent 12 }}
+        - name: csi-provisioner
+          image: {{ .Values.controller.provisionerImage }}
+          args:
+            - --csi-address=/csi/csi.sock
+            - --feature-gates=Topology=true
+            - --v=2
+          volumeMounts:
+            - name: csi-socket
+              mountPath: /csi
+      volumes:
+        - name: csi-socket
+          emptyDir: {}

@@ -1,0 +1,30 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "simple-volume.fullname" . }}
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "pods", "persistentvolumes", "persistentvolumeclaims", "events", "secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses", "csidrivers", "csinodes", "volumeattachments"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["storage.shipstuff.io"]
+    resources: ["simplevolumes", "simplevolumes/status", "clustersimplevolumes", "clustersimplevolumes/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "simple-volume.fullname" . }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "simple-volume.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "simple-volume.serviceAccountName" . }}
+    namespace: {{ include "simple-volume.namespace" . }}

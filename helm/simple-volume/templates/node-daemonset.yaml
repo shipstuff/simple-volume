@@ -1,0 +1,121 @@
+{{- $pool := index .Values.storagePools 0 -}}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "simple-volume.fullname" . }}-node
+  namespace: {{ include "simple-volume.namespace" . }}
+  labels:
+    app.kubernetes.io/name: {{ include "simple-volume.name" . }}
+    app.kubernetes.io/component: node
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "simple-volume.name" . }}
+      app.kubernetes.io/component: node
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "simple-volume.name" . }}
+        app.kubernetes.io/component: node
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        simple-volume.shipstuff.io/pool-{{ $pool.name }}: "true"
+    spec:
+      serviceAccountName: {{ include "simple-volume.serviceAccountName" . }}
+      hostNetwork: false
+      nodeSelector:
+        {{- toYaml .Values.node.nodeSelector | nindent 8 }}
+      affinity:
+        {{- toYaml .Values.node.affinity | nindent 8 }}
+      tolerations:
+        {{- toYaml .Values.node.tolerations | nindent 8 }}
+      containers:
+        - name: agent
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - agent
+            - --pool-name={{ $pool.name }}
+            - --pool-path=/pools/{{ $pool.name }}
+            {{- if $pool.allowNonEmpty }}
+            - --allow-non-empty-pool
+            {{- end }}
+          env:
+            - name: SIMPLE_VOLUME_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.sync.tokenSecretName }}
+                  key: {{ .Values.sync.tokenSecretKey }}
+          ports:
+            - name: http
+              containerPort: 8080
+          volumeMounts:
+            - name: pool-default
+              mountPath: /pools/{{ $pool.name }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+          resources:
+            {{- toYaml .Values.node.resources | nindent 12 }}
+        - name: csi-node
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - csi-node
+            - --endpoint=unix:///csi/csi.sock
+            - --pool-name={{ $pool.name }}
+            - --pool-path=/pools/{{ $pool.name }}
+            {{- if $pool.allowNonEmpty }}
+            - --allow-non-empty-pool
+            {{- end }}
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+            - name: kubelet-dir
+              mountPath: /var/lib/kubelet
+              mountPropagation: Bidirectional
+            - name: pool-default
+              mountPath: /pools/{{ $pool.name }}
+          resources:
+            {{- toYaml .Values.node.resources | nindent 12 }}
+        - name: node-driver-registrar
+          image: {{ .Values.node.registrarImage }}
+          args:
+            - --csi-address=/csi/csi.sock
+            - --kubelet-registration-path=/var/lib/kubelet/plugins/simple-volume.shipstuff.io/csi.sock
+            - --v=2
+          volumeMounts:
+            - name: plugin-dir
+              mountPath: /csi
+            - name: registration-dir
+              mountPath: /registration
+      volumes:
+        - name: plugin-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins/simple-volume.shipstuff.io
+            type: DirectoryOrCreate
+        - name: registration-dir
+          hostPath:
+            path: /var/lib/kubelet/plugins_registry
+            type: DirectoryOrCreate
+        - name: kubelet-dir
+          hostPath:
+            path: /var/lib/kubelet
+            type: Directory
+        - name: pool-default
+          hostPath:
+            path: {{ $pool.path | quote }}
+            type: DirectoryOrCreate

@@ -1,0 +1,43 @@
+image:
+  repository: ghcr.io/shipstuff/simple-volume
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+namespaceOverride: ""
+
+controller:
+  replicas: 1
+  resources: {}
+  provisionerImage: registry.k8s.io/sig-storage/csi-provisioner:v5.2.0
+
+node:
+  resources: {}
+  registrarImage: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.13.0
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+storagePools:
+  - name: default
+    path: /var/lib/simple-volume
+    defaultReplicaCount: 2
+    allowNonEmpty: false
+
+storageClass:
+  create: true
+  name: simple-volume
+  reclaimPolicy: Retain
+  volumeBindingMode: WaitForFirstConsumer
+  allowVolumeExpansion: true
+
+sync:
+  tokenSecretName: simple-volume-sync-token
+  tokenSecretKey: token
+  token: "change-me"
+
+networkPolicy:
+  enabled: false
+
+serviceAccount:
+  create: true
+  name: ""

@@ -1,0 +1,11 @@
+storagePools:
+  - name: default
+    path: /tmp/simple-volume-demo
+    defaultReplicaCount: 2
+    allowNonEmpty: false
+
+sync:
+  token: "demo-token"
+
+networkPolicy:
+  enabled: false

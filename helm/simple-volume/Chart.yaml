@@ -1,0 +1,7 @@
+apiVersion: v2
+name: simple-volume
+description: Async replicated local volumes with a thin CSI mount boundary.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+
