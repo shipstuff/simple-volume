@@ -23,6 +23,9 @@ const (
 	AnnotationFailoverWorkloadNamespace = LabelPrefix + "/failover-workload-namespace"
 	AnnotationFailoverGracePeriod       = LabelPrefix + "/failover-grace-period"
 	AnnotationFailoverMaxStaleness      = LabelPrefix + "/failover-max-staleness"
+	AnnotationActiveNode                = LabelPrefix + "/active-node"
+	AnnotationPreviousActiveNode        = LabelPrefix + "/previous-active-node"
+	AnnotationSelectedNode              = "volume.kubernetes.io/selected-node"
 )
 
 type FailoverController struct {
@@ -136,7 +139,11 @@ func (c *FailoverController) reconcilePVC(ctx context.Context, pvc *corev1.Persi
 	if !decision.Promote {
 		return fmt.Errorf("failover blocked: %s", decision.Reason)
 	}
-	if err := c.patchDeploymentNodeSelector(ctx, pvc, decision.TargetNode); err != nil {
+	previousActive := activeNodeFromPods(usingClaim, decision.TargetNode)
+	if err := c.promoteStorageBinding(ctx, pvc, decision.TargetNode, previousActive); err != nil {
+		return err
+	}
+	if err := c.patchDeploymentForStorageScheduling(ctx, pvc); err != nil {
 		return err
 	}
 	for _, pod := range usingClaim {
@@ -190,7 +197,47 @@ func SelectFailoverTarget(pods []corev1.Pod, agents map[string]corev1.Pod, ready
 	return FailoverDecision{Promote: true, TargetNode: candidates[0].node, Reason: "FreshReplicaNode"}
 }
 
-func (c *FailoverController) patchDeploymentNodeSelector(ctx context.Context, pvc *corev1.PersistentVolumeClaim, targetNode string) error {
+func (c *FailoverController) promoteStorageBinding(ctx context.Context, pvc *corev1.PersistentVolumeClaim, targetNode, previousActive string) error {
+	if pvc.Spec.VolumeName == "" {
+		return fmt.Errorf("pvc %s/%s has no bound volume", pvc.Namespace, pvc.Name)
+	}
+	pv, err := c.client.CoreV1().PersistentVolumes().Get(ctx, pvc.Spec.VolumeName, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	updatedPV := pv.DeepCopy()
+	if updatedPV.Annotations == nil {
+		updatedPV.Annotations = make(map[string]string)
+	}
+	updatedPV.Annotations[AnnotationActiveNode] = targetNode
+	if previousActive != "" {
+		updatedPV.Annotations[AnnotationPreviousActiveNode] = previousActive
+	}
+	updatedPV.Spec.NodeAffinity = nodeAffinityForNode(targetNode)
+	if _, err := c.client.CoreV1().PersistentVolumes().Update(ctx, updatedPV, metav1.UpdateOptions{}); err != nil {
+		return err
+	}
+
+	latestPVC, err := c.client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Get(ctx, pvc.Name, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	updatedPVC := latestPVC.DeepCopy()
+	if updatedPVC.Annotations == nil {
+		updatedPVC.Annotations = make(map[string]string)
+	}
+	updatedPVC.Annotations[AnnotationActiveNode] = targetNode
+	if previousActive != "" {
+		updatedPVC.Annotations[AnnotationPreviousActiveNode] = previousActive
+	}
+	delete(updatedPVC.Annotations, AnnotationSelectedNode)
+	if _, err := c.client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Update(ctx, updatedPVC, metav1.UpdateOptions{}); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (c *FailoverController) patchDeploymentForStorageScheduling(ctx context.Context, pvc *corev1.PersistentVolumeClaim) error {
 	kind := strings.TrimSpace(pvc.Annotations[AnnotationFailoverWorkloadKind])
 	if kind == "" {
 		kind = "Deployment"
@@ -211,11 +258,13 @@ func (c *FailoverController) patchDeploymentNodeSelector(ctx context.Context, pv
 		return err
 	}
 	updated := deployment.DeepCopy()
-	if updated.Spec.Template.Spec.NodeSelector == nil {
-		updated.Spec.Template.Spec.NodeSelector = make(map[string]string)
+	if updated.Spec.Template.Spec.NodeSelector != nil {
+		delete(updated.Spec.Template.Spec.NodeSelector, corev1.LabelHostname)
+		if len(updated.Spec.Template.Spec.NodeSelector) == 0 {
+			updated.Spec.Template.Spec.NodeSelector = nil
+		}
 	}
-	updated.Spec.Template.Spec.NodeSelector["kubernetes.io/hostname"] = targetNode
-	if deploymentNodeSelectorEqual(deployment, updated) {
+	if deploymentSchedulingEqual(deployment, updated) {
 		return nil
 	}
 	_, err = c.client.AppsV1().Deployments(namespace).Update(ctx, updated, metav1.UpdateOptions{})
@@ -281,6 +330,29 @@ func volumeKey(namespace, volume string) string {
 	return namespace + "/" + volume
 }
 
+func nodeAffinityForNode(node string) *corev1.VolumeNodeAffinity {
+	return &corev1.VolumeNodeAffinity{
+		Required: &corev1.NodeSelector{
+			NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+				MatchExpressions: []corev1.NodeSelectorRequirement{{
+					Key:      corev1.LabelHostname,
+					Operator: corev1.NodeSelectorOpIn,
+					Values:   []string{node},
+				}},
+			}},
+		},
+	}
+}
+
+func activeNodeFromPods(pods []corev1.Pod, promotedNode string) string {
+	for _, pod := range pods {
+		if pod.Spec.NodeName != "" && pod.Spec.NodeName != promotedNode {
+			return pod.Spec.NodeName
+		}
+	}
+	return ""
+}
+
 func readyNodeSet(nodes []corev1.Node) map[string]bool {
 	out := make(map[string]bool)
 	for _, node := range nodes {
@@ -320,13 +392,8 @@ func pvcKey(pvc *corev1.PersistentVolumeClaim) string {
 	return pvc.Namespace + "/" + pvc.Name
 }
 
-func deploymentNodeSelectorEqual(before, after *appsv1.Deployment) bool {
-	var beforeNode, afterNode string
-	if before.Spec.Template.Spec.NodeSelector != nil {
-		beforeNode = before.Spec.Template.Spec.NodeSelector["kubernetes.io/hostname"]
-	}
-	if after.Spec.Template.Spec.NodeSelector != nil {
-		afterNode = after.Spec.Template.Spec.NodeSelector["kubernetes.io/hostname"]
-	}
-	return beforeNode == afterNode
+func deploymentSchedulingEqual(before, after *appsv1.Deployment) bool {
+	return before.Spec.Template.Spec.NodeSelector == nil && after.Spec.Template.Spec.NodeSelector == nil ||
+		before.Spec.Template.Spec.NodeSelector != nil && after.Spec.Template.Spec.NodeSelector != nil &&
+			before.Spec.Template.Spec.NodeSelector[corev1.LabelHostname] == after.Spec.Template.Spec.NodeSelector[corev1.LabelHostname]
 }

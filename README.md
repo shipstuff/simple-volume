@@ -104,8 +104,13 @@ metadata:
 
 When no healthy pod using the claim is running on a Ready, schedulable node for
 the grace period, the controller selects a ready replica node whose last
-successful sync is within `failover-max-staleness`, patches the Deployment's
-`kubernetes.io/hostname` node selector, and deletes stale pods using the claim.
+successful sync is within `failover-max-staleness`, updates the bound PV's
+`nodeAffinity` to the promoted node, records
+`simple-volume.shipstuff.io/active-node` on the PV/PVC, removes the stale
+Kubernetes `volume.kubernetes.io/selected-node` PVC annotation, and deletes
+stale pods using the claim. Demo Deployment support only removes an old hard
+`kubernetes.io/hostname` node selector; replacement pods should follow the PV
+scheduling constraint.
 
 The old active node is not promoted back automatically when it returns. If the
 old active rejoins as a replica target, the next full sync asks that agent to

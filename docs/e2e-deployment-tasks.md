@@ -82,6 +82,9 @@ kubectl exec deploy/simple-volume-demo -- sh -c 'echo ok >> /data/e2e.txt && cat
 - Add an E2E test script that writes data, syncs it to a second node, simulates
   active-node loss, promotes a fresh replica, reschedules the demo pod, and
   verifies data on the promoted node.
+- Verify failover updates the bound PV `nodeAffinity`, records active-node
+  annotations on the PV/PVC, and removes the stale PVC selected-node annotation
+  so debugging follows storage state instead of an initial scheduling hint.
 - Extend the failover drill so the old active node rejoins, backs up its stale
   local copy under `.simple-volume-backups/`, restores from the promoted leader,
   and remains a replica unless an explicit move-back is requested.

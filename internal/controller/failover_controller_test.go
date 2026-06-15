@@ -12,9 +12,15 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 )
 
-func TestFailoverControllerPatchesDeploymentAndDeletesStalePod(t *testing.T) {
+func TestFailoverControllerPromotesStorageBindingAndDeletesStalePod(t *testing.T) {
 	storageClass := "simple-volume"
 	client := fake.NewSimpleClientset(
+		&corev1.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{Name: "pvc-123"},
+			Spec: corev1.PersistentVolumeSpec{
+				NodeAffinity: nodeAffinityForNode("kapolei-pacific-1"),
+			},
+		},
 		&corev1.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "data",
@@ -32,6 +38,7 @@ func TestFailoverControllerPatchesDeploymentAndDeletesStalePod(t *testing.T) {
 					AnnotationDebounce:                  "2s",
 					AnnotationExcludePaths:              "downloads/**",
 					AnnotationFailoverWorkloadNamespace: "default",
+					AnnotationSelectedNode:              "kapolei-pacific-1",
 				},
 			},
 			Spec: corev1.PersistentVolumeClaimSpec{
@@ -65,8 +72,31 @@ func TestFailoverControllerPatchesDeploymentAndDeletesStalePod(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get deployment: %v", err)
 	}
-	if got := updated.Spec.Template.Spec.NodeSelector["kubernetes.io/hostname"]; got != "fresno-west-1" {
-		t.Fatalf("nodeSelector = %q, want fresno-west-1", got)
+	if updated.Spec.Template.Spec.NodeSelector != nil {
+		t.Fatalf("nodeSelector = %#v, want storage-driven scheduling", updated.Spec.Template.Spec.NodeSelector)
+	}
+	pv, err := client.CoreV1().PersistentVolumes().Get(context.Background(), "pvc-123", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get pv: %v", err)
+	}
+	if got := nodeAffinityHostname(pv.Spec.NodeAffinity); got != "fresno-west-1" {
+		t.Fatalf("pv nodeAffinity = %q, want fresno-west-1", got)
+	}
+	if got := pv.Annotations[AnnotationActiveNode]; got != "fresno-west-1" {
+		t.Fatalf("pv active node annotation = %q, want fresno-west-1", got)
+	}
+	if got := pv.Annotations[AnnotationPreviousActiveNode]; got != "kapolei-pacific-1" {
+		t.Fatalf("pv previous active node annotation = %q, want kapolei-pacific-1", got)
+	}
+	pvc, err := client.CoreV1().PersistentVolumeClaims("default").Get(context.Background(), "data", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get pvc: %v", err)
+	}
+	if got := pvc.Annotations[AnnotationActiveNode]; got != "fresno-west-1" {
+		t.Fatalf("pvc active node annotation = %q, want fresno-west-1", got)
+	}
+	if _, ok := pvc.Annotations[AnnotationSelectedNode]; ok {
+		t.Fatalf("selected-node annotation should be removed: %#v", pvc.Annotations)
 	}
 	_, err = client.CoreV1().Pods("default").Get(context.Background(), "writer-old", metav1.GetOptions{})
 	if !apierrors.IsNotFound(err) {
@@ -145,6 +175,20 @@ func deployment(name, namespace, node string) *appsv1.Deployment {
 			},
 		},
 	}
+}
+
+func nodeAffinityHostname(affinity *corev1.VolumeNodeAffinity) string {
+	if affinity == nil || affinity.Required == nil {
+		return ""
+	}
+	for _, term := range affinity.Required.NodeSelectorTerms {
+		for _, expr := range term.MatchExpressions {
+			if expr.Key == corev1.LabelHostname && expr.Operator == corev1.NodeSelectorOpIn && len(expr.Values) == 1 {
+				return expr.Values[0]
+			}
+		}
+	}
+	return ""
 }
 
 func readyNode(name string, ready bool) *corev1.Node {
