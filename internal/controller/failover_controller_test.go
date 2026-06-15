@@ -25,6 +25,7 @@ func TestFailoverControllerPatchesDeploymentAndDeletesStalePod(t *testing.T) {
 					AnnotationFailoverWorkloadKind:      "Deployment",
 					AnnotationFailoverWorkloadName:      "writer",
 					AnnotationFailoverGracePeriod:       "1s",
+					AnnotationFailoverMaxStaleness:      "30s",
 					AnnotationIncludePaths:              "writes.log",
 					AnnotationFullSyncOnStart:           "true",
 					AnnotationFullSyncSchedule:          "0 4 * * *",
@@ -52,6 +53,8 @@ func TestFailoverControllerPatchesDeploymentAndDeletesStalePod(t *testing.T) {
 		AgentLabelSelector: "app.kubernetes.io/component=node",
 	})
 	now := time.Date(2026, 6, 15, 5, 0, 0, 0, time.UTC)
+	controller.RecordReplicaFreshness("default", "pvc-123", "sf-west-1", now.Add(-5*time.Second), true)
+	controller.RecordReplicaFreshness("default", "pvc-123", "fresno-west-1", now.Add(-2*time.Second), true)
 	if err := controller.Reconcile(context.Background(), now); err != nil {
 		t.Fatalf("first Reconcile returned error: %v", err)
 	}
@@ -68,6 +71,54 @@ func TestFailoverControllerPatchesDeploymentAndDeletesStalePod(t *testing.T) {
 	_, err = client.CoreV1().Pods("default").Get(context.Background(), "writer-old", metav1.GetOptions{})
 	if !apierrors.IsNotFound(err) {
 		t.Fatalf("old pod error = %v, want not found", err)
+	}
+}
+
+func TestFailoverControllerBlocksStaleReplicas(t *testing.T) {
+	storageClass := "simple-volume"
+	client := fake.NewSimpleClientset(
+		&corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "data",
+				Namespace: "default",
+				Annotations: map[string]string{
+					AnnotationReplicationEnabled:   "true",
+					AnnotationFailoverEnabled:      "true",
+					AnnotationFailoverWorkloadName: "writer",
+					AnnotationFailoverGracePeriod:  "1s",
+					AnnotationFailoverMaxStaleness: "30s",
+				},
+			},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				StorageClassName: &storageClass,
+				VolumeName:       "pvc-123",
+			},
+		},
+		deployment("writer", "default", "kapolei-pacific-1"),
+		workloadPod("writer-old", "default", "kapolei-pacific-1", "data"),
+		readyNode("sf-west-1", true),
+		readyNode("kapolei-pacific-1", false),
+		agentPod("agent-sf", "sf-west-1", "10.0.0.11"),
+	)
+	controller := NewFailoverController(client, ReplicationControllerConfig{
+		Namespace:          "simple-volume-system",
+		StorageClassName:   storageClass,
+		AgentLabelSelector: "app.kubernetes.io/component=node",
+	})
+	now := time.Date(2026, 6, 15, 5, 0, 0, 0, time.UTC)
+	controller.RecordReplicaFreshness("default", "pvc-123", "sf-west-1", now.Add(-2*time.Minute), true)
+	if err := controller.Reconcile(context.Background(), now); err != nil {
+		t.Fatalf("first Reconcile returned error: %v", err)
+	}
+	if err := controller.Reconcile(context.Background(), now.Add(2*time.Second)); err != nil {
+		t.Fatalf("second Reconcile returned error: %v", err)
+	}
+	updated, err := client.AppsV1().Deployments("default").Get(context.Background(), "writer", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get deployment: %v", err)
+	}
+	if got := updated.Spec.Template.Spec.NodeSelector["kubernetes.io/hostname"]; got != "kapolei-pacific-1" {
+		t.Fatalf("nodeSelector = %q, want original node", got)
 	}
 }
 

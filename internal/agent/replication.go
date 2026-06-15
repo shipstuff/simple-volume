@@ -41,11 +41,12 @@ type SourceRef struct {
 }
 
 type FullSyncRequest struct {
-	Namespace    string    `json:"namespace,omitempty"`
-	Volume       string    `json:"volume"`
-	Source       SourceRef `json:"source"`
-	IncludePaths []string  `json:"includePaths,omitempty"`
-	ExcludePaths []string  `json:"excludePaths,omitempty"`
+	Namespace      string    `json:"namespace,omitempty"`
+	Volume         string    `json:"volume"`
+	Source         SourceRef `json:"source"`
+	IncludePaths   []string  `json:"includePaths,omitempty"`
+	ExcludePaths   []string  `json:"excludePaths,omitempty"`
+	BackupExisting bool      `json:"backupExisting,omitempty"`
 }
 
 type PathFilter struct {
@@ -223,11 +224,17 @@ func ApplyFullSync(ctx context.Context, runner Runner, pool Pool, req FullSyncRe
 	if req.Source.WebDAVURL == "" {
 		return fmt.Errorf("source.webdavUrl is required")
 	}
-	targetRoot, err := EnsureVolumePath(VolumePath{
+	volumePath := VolumePath{
 		Pool:      pool,
 		Namespace: req.Namespace,
 		Name:      req.Volume,
-	}, 0o755)
+	}
+	if req.BackupExisting {
+		if _, err := BackupVolumePath(volumePath, time.Now().UTC()); err != nil {
+			return err
+		}
+	}
+	targetRoot, err := EnsureVolumePath(volumePath, 0o755)
 	if err != nil {
 		return err
 	}

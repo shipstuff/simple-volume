@@ -99,12 +99,19 @@ metadata:
     simple-volume.shipstuff.io/failover-workload-kind: "Deployment"
     simple-volume.shipstuff.io/failover-workload-name: "my-writer"
     simple-volume.shipstuff.io/failover-grace-period: "1m"
+    simple-volume.shipstuff.io/failover-max-staleness: "2m"
 ```
 
 When no healthy pod using the claim is running on a Ready, schedulable node for
-the grace period, the controller selects a ready replica node, patches the
-Deployment's `kubernetes.io/hostname` node selector, and deletes stale pods
-using the claim.
+the grace period, the controller selects a ready replica node whose last
+successful sync is within `failover-max-staleness`, patches the Deployment's
+`kubernetes.io/hostname` node selector, and deletes stale pods using the claim.
+
+The old active node is not promoted back automatically when it returns. If the
+old active rejoins as a replica target, the next full sync asks that agent to
+move its existing local volume into `.simple-volume-backups/` before restoring
+from the current leader. That keeps a rollback copy of the pre-restore local
+state while avoiding split-brain.
 
 ## Development
 

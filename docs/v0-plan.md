@@ -78,6 +78,14 @@
       - target replica within maxStaleness
       - target agent healthy
       - old writer marked demoted/stale in API state
+      - returning old active is treated as stale local state, not as the leader
+
+  - Returning-node restore:
+      - promoted node remains the source of truth
+      - old active rejoins as a replica target only
+      - before restore, the node agent moves its existing local volume into a timestamped `.simple-volume-backups/` path
+      - restore then overwrites the live replica path from the current leader
+      - automatic move-back is out of scope; planned move-back must be explicit
 
   - Auto-promotion is opt-in per volume and controlled by per-volume grace/deadline fields.
   - Workload movement uses normal Kubernetes scheduling:
@@ -128,4 +136,3 @@
   - CSI is a thin Kubernetes volume boundary, not the replication engine.
   - Node-agent DaemonSet placement defines the default storage-capable node set.
   - Production workload adoption requires a later explicit rollout plan, restore drill, and failure-mode test.
-

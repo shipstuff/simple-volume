@@ -62,7 +62,7 @@ func TestDesiredReplicationsDiscoversActiveAndReplicaAgents(t *testing.T) {
 	if len(got.Targets) != 2 {
 		t.Fatalf("targets = %#v", got.Targets)
 	}
-	if got.Targets[0].Token != "secret" || got.Targets[1].Token != "secret" {
+	if got.Targets[0].Ref.Token != "secret" || got.Targets[1].Ref.Token != "secret" {
 		t.Fatalf("target tokens = %#v", got.Targets)
 	}
 	if got.IncludePaths[0] != "writes.log" || got.IncludePaths[1] != "saves/**" {
@@ -112,12 +112,15 @@ func TestReconcileOneStartsWatchAndRunsStartupFullSyncOnce(t *testing.T) {
 
 	controller := NewReplicationController(nil, ReplicationControllerConfig{})
 	desired := DesiredReplication{
-		Namespace:    "default",
-		ClaimName:    "data",
-		Volume:       "pvc-123",
-		ActiveNode:   "kapolei-pacific-1",
-		SourceURL:    source.URL,
-		Targets:      []agent.TargetRef{{URL: targetA.URL, Token: "secret"}, {URL: targetB.URL, Token: "secret"}},
+		Namespace:  "default",
+		ClaimName:  "data",
+		Volume:     "pvc-123",
+		ActiveNode: "kapolei-pacific-1",
+		SourceURL:  source.URL,
+		Targets: []DesiredTarget{
+			{Node: "sf-west-1", Ref: agent.TargetRef{URL: targetA.URL, Token: "secret"}},
+			{Node: "fresno-west-1", Ref: agent.TargetRef{URL: targetB.URL, Token: "secret"}},
+		},
 		IncludePaths: []string{"writes.log"},
 		Debounce:     "2s",
 		FullSync:     true,

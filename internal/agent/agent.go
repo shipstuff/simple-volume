@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const PoolMarkerFile = ".simple-volume-pool"
@@ -86,6 +87,35 @@ func EnsureVolumePath(v VolumePath, perm os.FileMode) (string, error) {
 		return "", err
 	}
 	return path, nil
+}
+
+func BackupVolumePath(v VolumePath, now time.Time) (string, error) {
+	path, err := ResolveVolumePath(v)
+	if err != nil {
+		return "", err
+	}
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return "", nil
+	} else if err != nil {
+		return "", err
+	}
+	empty, err := IsEmptyDir(path)
+	if err != nil {
+		return "", err
+	}
+	if empty {
+		return "", nil
+	}
+	pool := v.Pool.Clean()
+	backupRoot := filepath.Join(pool.Path, ".simple-volume-backups", safeSegment(v.Namespace), safeSegment(v.Name))
+	if err := os.MkdirAll(backupRoot, 0o755); err != nil {
+		return "", err
+	}
+	backupPath := filepath.Join(backupRoot, now.UTC().Format("20060102T150405.000000000Z"))
+	if err := os.Rename(path, backupPath); err != nil {
+		return "", err
+	}
+	return backupPath, nil
 }
 
 type SyncRequest struct {

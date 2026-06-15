@@ -33,23 +33,34 @@ type WatchStopRequest struct {
 }
 
 type WatchStatus struct {
-	Namespace            string      `json:"namespace,omitempty"`
-	Volume               string      `json:"volume"`
-	Source               SourceRef   `json:"source"`
-	Targets              []TargetRef `json:"targets"`
-	IncludePaths         []string    `json:"includePaths,omitempty"`
-	ExcludePaths         []string    `json:"excludePaths,omitempty"`
-	Running              bool        `json:"running"`
-	StartedAt            time.Time   `json:"startedAt"`
-	StoppedAt            *time.Time  `json:"stoppedAt,omitempty"`
-	LastBatchAt          *time.Time  `json:"lastBatchAt,omitempty"`
-	LastBatchEventCount  int         `json:"lastBatchEventCount,omitempty"`
-	LastBatchGeneration  string      `json:"lastBatchGeneration,omitempty"`
-	LastDeliveryError    string      `json:"lastDeliveryError,omitempty"`
-	LastWatchError       string      `json:"lastWatchError,omitempty"`
-	DeliveredBatchCount  int64       `json:"deliveredBatchCount,omitempty"`
-	DeliveredEventCount  int64       `json:"deliveredEventCount,omitempty"`
-	DeliveryFailureCount int64       `json:"deliveryFailureCount,omitempty"`
+	Namespace            string         `json:"namespace,omitempty"`
+	Volume               string         `json:"volume"`
+	Source               SourceRef      `json:"source"`
+	Targets              []TargetRef    `json:"targets"`
+	TargetStatuses       []TargetStatus `json:"targetStatuses,omitempty"`
+	IncludePaths         []string       `json:"includePaths,omitempty"`
+	ExcludePaths         []string       `json:"excludePaths,omitempty"`
+	Running              bool           `json:"running"`
+	StartedAt            time.Time      `json:"startedAt"`
+	StoppedAt            *time.Time     `json:"stoppedAt,omitempty"`
+	LastBatchAt          *time.Time     `json:"lastBatchAt,omitempty"`
+	LastBatchEventCount  int            `json:"lastBatchEventCount,omitempty"`
+	LastBatchGeneration  string         `json:"lastBatchGeneration,omitempty"`
+	LastDeliveryError    string         `json:"lastDeliveryError,omitempty"`
+	LastWatchError       string         `json:"lastWatchError,omitempty"`
+	DeliveredBatchCount  int64          `json:"deliveredBatchCount,omitempty"`
+	DeliveredEventCount  int64          `json:"deliveredEventCount,omitempty"`
+	DeliveryFailureCount int64          `json:"deliveryFailureCount,omitempty"`
+}
+
+type TargetStatus struct {
+	URL                    string     `json:"url"`
+	LastSuccessfulSync     *time.Time `json:"lastSuccessfulSync,omitempty"`
+	LastObservedGeneration string     `json:"lastObservedGeneration,omitempty"`
+	LastError              string     `json:"lastError,omitempty"`
+	DeliveredBatchCount    int64      `json:"deliveredBatchCount,omitempty"`
+	DeliveredEventCount    int64      `json:"deliveredEventCount,omitempty"`
+	DeliveryFailureCount   int64      `json:"deliveryFailureCount,omitempty"`
 }
 
 type BatchSender interface {
@@ -139,14 +150,15 @@ func (m *WatchManager) Start(ctx context.Context, req WatchStartRequest) (WatchS
 	key := watchKey(req.Namespace, req.Volume)
 	watchCtx, cancel := context.WithCancel(context.Background())
 	status := WatchStatus{
-		Namespace:    req.Namespace,
-		Volume:       req.Volume,
-		Source:       req.Source,
-		Targets:      append([]TargetRef(nil), req.Targets...),
-		IncludePaths: append([]string(nil), req.IncludePaths...),
-		ExcludePaths: append([]string(nil), req.ExcludePaths...),
-		Running:      true,
-		StartedAt:    time.Now().UTC(),
+		Namespace:      req.Namespace,
+		Volume:         req.Volume,
+		Source:         req.Source,
+		Targets:        append([]TargetRef(nil), req.Targets...),
+		TargetStatuses: initialTargetStatuses(req.Targets),
+		IncludePaths:   append([]string(nil), req.IncludePaths...),
+		ExcludePaths:   append([]string(nil), req.ExcludePaths...),
+		Running:        true,
+		StartedAt:      time.Now().UTC(),
 	}
 
 	m.mu.Lock()
@@ -283,17 +295,17 @@ func (m *WatchManager) run(ctx context.Context, key string, watch *managedWatch,
 		batch.Source = source
 		for _, target := range targets {
 			if err := m.sender.SendBatch(ctx, target, batch); err != nil {
-				m.recordDeliveryError(key, watch, err)
+				m.recordDeliveryError(key, watch, target, err)
 				continue
 			}
-			m.recordDeliverySuccess(key, watch, batch)
+			m.recordDeliverySuccess(key, watch, target, batch)
 		}
 		return nil
 	})
 	m.recordStopped(key, watch, err)
 }
 
-func (m *WatchManager) recordDeliverySuccess(key string, watch *managedWatch, batch EventBatch) {
+func (m *WatchManager) recordDeliverySuccess(key string, watch *managedWatch, target TargetRef, batch EventBatch) {
 	now := time.Now().UTC()
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -306,9 +318,15 @@ func (m *WatchManager) recordDeliverySuccess(key string, watch *managedWatch, ba
 	watch.status.DeliveredBatchCount++
 	watch.status.DeliveredEventCount += int64(len(batch.Events))
 	watch.status.LastDeliveryError = ""
+	targetStatus := ensureTargetStatus(&watch.status, target.URL)
+	targetStatus.LastSuccessfulSync = &now
+	targetStatus.LastObservedGeneration = batch.Generation
+	targetStatus.DeliveredBatchCount++
+	targetStatus.DeliveredEventCount += int64(len(batch.Events))
+	targetStatus.LastError = ""
 }
 
-func (m *WatchManager) recordDeliveryError(key string, watch *managedWatch, err error) {
+func (m *WatchManager) recordDeliveryError(key string, watch *managedWatch, target TargetRef, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.watches[key] != watch {
@@ -316,6 +334,9 @@ func (m *WatchManager) recordDeliveryError(key string, watch *managedWatch, err 
 	}
 	watch.status.DeliveryFailureCount++
 	watch.status.LastDeliveryError = err.Error()
+	targetStatus := ensureTargetStatus(&watch.status, target.URL)
+	targetStatus.DeliveryFailureCount++
+	targetStatus.LastError = err.Error()
 }
 
 func (m *WatchManager) recordStopped(key string, watch *managedWatch, err error) {
@@ -350,7 +371,26 @@ func parseOptionalDuration(value string, fallback time.Duration) (time.Duration,
 
 func cloneWatchStatus(status WatchStatus) WatchStatus {
 	status.Targets = append([]TargetRef(nil), status.Targets...)
+	status.TargetStatuses = append([]TargetStatus(nil), status.TargetStatuses...)
 	status.IncludePaths = append([]string(nil), status.IncludePaths...)
 	status.ExcludePaths = append([]string(nil), status.ExcludePaths...)
 	return status
+}
+
+func initialTargetStatuses(targets []TargetRef) []TargetStatus {
+	statuses := make([]TargetStatus, 0, len(targets))
+	for _, target := range targets {
+		statuses = append(statuses, TargetStatus{URL: target.URL})
+	}
+	return statuses
+}
+
+func ensureTargetStatus(status *WatchStatus, targetURL string) *TargetStatus {
+	for i := range status.TargetStatuses {
+		if status.TargetStatuses[i].URL == targetURL {
+			return &status.TargetStatuses[i]
+		}
+	}
+	status.TargetStatuses = append(status.TargetStatuses, TargetStatus{URL: targetURL})
+	return &status.TargetStatuses[len(status.TargetStatuses)-1]
 }

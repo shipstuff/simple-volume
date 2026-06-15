@@ -55,13 +55,18 @@ type ReplicationController struct {
 	lastScheduledOn map[string]string
 }
 
+type DesiredTarget struct {
+	Node string
+	Ref  agent.TargetRef
+}
+
 type DesiredReplication struct {
 	Namespace    string
 	ClaimName    string
 	Volume       string
 	ActiveNode   string
 	SourceURL    string
-	Targets      []agent.TargetRef
+	Targets      []DesiredTarget
 	IncludePaths []string
 	ExcludePaths []string
 	Debounce     string
@@ -187,17 +192,20 @@ func (c *ReplicationController) DesiredReplications(ctx context.Context, token s
 			log.Printf("replication pvc %s/%s active node %s has no ready agent", pvc.Namespace, pvc.Name, activePod.Spec.NodeName)
 			continue
 		}
-		targets := make([]agent.TargetRef, 0, len(agents)-1)
+		targets := make([]DesiredTarget, 0, len(agents)-1)
 		for node, pod := range agents {
 			if node == activePod.Spec.NodeName {
 				continue
 			}
-			targets = append(targets, agent.TargetRef{
-				URL:   agentHTTPURL(pod.Status.PodIP),
-				Token: token,
+			targets = append(targets, DesiredTarget{
+				Node: node,
+				Ref: agent.TargetRef{
+					URL:   agentHTTPURL(pod.Status.PodIP),
+					Token: token,
+				},
 			})
 		}
-		sort.Slice(targets, func(i, j int) bool { return targets[i].URL < targets[j].URL })
+		sort.Slice(targets, func(i, j int) bool { return targets[i].Node < targets[j].Node })
 		if len(targets) == 0 {
 			log.Printf("replication pvc %s/%s has no replica targets", pvc.Namespace, pvc.Name)
 			continue
@@ -232,12 +240,14 @@ func (c *ReplicationController) reconcileOne(ctx context.Context, desired Desire
 	alreadyStarted := c.startedWatches[key] == signature
 	c.mu.Unlock()
 	if alreadyStarted {
-		running, err := c.watchRunning(ctx, desired, token)
+		status, err := c.watchStatus(ctx, desired, token)
 		if err != nil {
 			log.Printf("check replication watch namespace=%s claim=%s volume=%s: %v", desired.Namespace, desired.ClaimName, desired.Volume, err)
 			alreadyStarted = false
-		} else if !running {
+		} else if !status.Running {
 			alreadyStarted = false
+		} else {
+			c.recordWatchFreshness(desired, status)
 		}
 	}
 	if !alreadyStarted {
@@ -257,7 +267,7 @@ func (c *ReplicationController) reconcileOne(ctx context.Context, desired Desire
 		done := c.completedSyncs[syncKey]
 		c.mu.Unlock()
 		if !done {
-			if err := c.fullSyncTargets(ctx, desired, token); err != nil {
+			if err := c.fullSyncTargets(ctx, desired, token, now); err != nil {
 				return err
 			}
 			c.mu.Lock()
@@ -275,7 +285,7 @@ func (c *ReplicationController) reconcileOne(ctx context.Context, desired Desire
 		last := c.lastScheduledOn[scheduleKey]
 		c.mu.Unlock()
 		if last != today {
-			if err := c.fullSyncTargets(ctx, desired, token); err != nil {
+			if err := c.fullSyncTargets(ctx, desired, token, now); err != nil {
 				return err
 			}
 			c.mu.Lock()
@@ -293,7 +303,7 @@ func (c *ReplicationController) startWatch(ctx context.Context, desired DesiredR
 		Namespace:    desired.Namespace,
 		Volume:       desired.Volume,
 		Source:       agent.SourceRef{WebDAVURL: desired.SourceURL},
-		Targets:      desired.Targets,
+		Targets:      targetRefs(desired.Targets),
 		IncludePaths: desired.IncludePaths,
 		ExcludePaths: desired.ExcludePaths,
 		Debounce:     desired.Debounce,
@@ -301,47 +311,52 @@ func (c *ReplicationController) startWatch(ctx context.Context, desired DesiredR
 	return c.postJSON(ctx, strings.TrimRight(agentHTTPURLFromWebDAV(desired.SourceURL), "/")+"/replication/watch/start", token, req)
 }
 
-func (c *ReplicationController) watchRunning(ctx context.Context, desired DesiredReplication, token string) (bool, error) {
+func (c *ReplicationController) watchStatus(ctx context.Context, desired DesiredReplication, token string) (agent.WatchStatus, error) {
 	statusURL := strings.TrimRight(agentHTTPURLFromWebDAV(desired.SourceURL), "/") +
 		"/replication/watch/status?namespace=" + url.QueryEscape(desired.Namespace) + "&volume=" + url.QueryEscape(desired.Volume)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, statusURL, nil)
 	if err != nil {
-		return false, err
+		return agent.WatchStatus{}, err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return false, err
+		return agent.WatchStatus{}, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusNotFound {
-		return false, nil
+		return agent.WatchStatus{}, nil
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return false, fmt.Errorf("%s returned %s: %s", statusURL, resp.Status, strings.TrimSpace(string(responseBody)))
+		return agent.WatchStatus{}, fmt.Errorf("%s returned %s: %s", statusURL, resp.Status, strings.TrimSpace(string(responseBody)))
 	}
-	var status struct {
-		Running bool `json:"running"`
-	}
+	var status agent.WatchStatus
 	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
-		return false, err
+		return agent.WatchStatus{}, err
 	}
-	return status.Running, nil
+	return status, nil
 }
 
-func (c *ReplicationController) fullSyncTargets(ctx context.Context, desired DesiredReplication, token string) error {
-	req := agent.FullSyncRequest{
-		Namespace:    desired.Namespace,
-		Volume:       desired.Volume,
-		Source:       agent.SourceRef{WebDAVURL: desired.SourceURL},
-		IncludePaths: desired.IncludePaths,
-		ExcludePaths: desired.ExcludePaths,
-	}
+func (c *ReplicationController) fullSyncTargets(ctx context.Context, desired DesiredReplication, token string, now time.Time) error {
 	var errs []string
 	for _, target := range desired.Targets {
-		if err := c.postJSON(ctx, strings.TrimRight(target.URL, "/")+"/replication/full-sync", token, req); err != nil {
+		backupExisting := c.failover.ShouldBackupBeforeRestore(desired.Namespace, desired.Volume, target.Node)
+		req := agent.FullSyncRequest{
+			Namespace:      desired.Namespace,
+			Volume:         desired.Volume,
+			Source:         agent.SourceRef{WebDAVURL: desired.SourceURL},
+			IncludePaths:   desired.IncludePaths,
+			ExcludePaths:   desired.ExcludePaths,
+			BackupExisting: backupExisting,
+		}
+		if err := c.postJSON(ctx, strings.TrimRight(target.Ref.URL, "/")+"/replication/full-sync", token, req); err != nil {
 			errs = append(errs, err.Error())
+			continue
+		}
+		c.failover.RecordReplicaFreshness(desired.Namespace, desired.Volume, target.Node, now, true)
+		if backupExisting {
+			c.failover.MarkRestored(desired.Namespace, desired.Volume, target.Node)
 		}
 	}
 	if len(errs) > 0 {
@@ -485,9 +500,11 @@ func (d DesiredReplication) signature() string {
 	b.WriteString(d.SourceURL)
 	b.WriteString("|")
 	for _, target := range d.Targets {
-		b.WriteString(target.URL)
+		b.WriteString(target.Node)
+		b.WriteString("=")
+		b.WriteString(target.Ref.URL)
 		b.WriteString(":")
-		b.WriteString(target.Token)
+		b.WriteString(target.Ref.Token)
 		b.WriteString(",")
 	}
 	b.WriteString("|")
@@ -497,6 +514,37 @@ func (d DesiredReplication) signature() string {
 	b.WriteString("|")
 	b.WriteString(d.Debounce)
 	return b.String()
+}
+
+func targetRefs(targets []DesiredTarget) []agent.TargetRef {
+	refs := make([]agent.TargetRef, 0, len(targets))
+	for _, target := range targets {
+		refs = append(refs, target.Ref)
+	}
+	return refs
+}
+
+func (c *ReplicationController) recordWatchFreshness(desired DesiredReplication, status agent.WatchStatus) {
+	if c.failover == nil {
+		return
+	}
+	nodesByURL := make(map[string]string, len(desired.Targets))
+	for _, target := range desired.Targets {
+		nodesByURL[target.Ref.URL] = target.Node
+	}
+	for _, targetStatus := range status.TargetStatuses {
+		node := nodesByURL[targetStatus.URL]
+		if node == "" || targetStatus.LastSuccessfulSync == nil {
+			continue
+		}
+		c.failover.RecordReplicaFreshness(
+			desired.Namespace,
+			desired.Volume,
+			node,
+			*targetStatus.LastSuccessfulSync,
+			targetStatus.LastError == "",
+		)
+	}
 }
 
 func shouldRunScheduledFullSync(schedule string, now time.Time) bool {

@@ -135,6 +135,41 @@ func TestApplyFullSyncRunsScopedRcloneSync(t *testing.T) {
 	}
 }
 
+func TestApplyFullSyncCanBackupExistingTarget(t *testing.T) {
+	dir := t.TempDir()
+	pool := Pool{Name: "default", Path: dir}
+	if err := EnsurePool(pool, false); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "default", "demo", "save.dat")
+	if err := writeFile(target, "old state"); err != nil {
+		t.Fatal(err)
+	}
+	runner := &recordingRunner{}
+	err := ApplyFullSync(context.Background(), runner, pool, FullSyncRequest{
+		Namespace:      "default",
+		Volume:         "demo",
+		Source:         SourceRef{WebDAVURL: "http://source:8081"},
+		BackupExisting: true,
+	})
+	if err != nil {
+		t.Fatalf("ApplyFullSync returned error: %v", err)
+	}
+	backups, err := filepath.Glob(filepath.Join(dir, ".simple-volume-backups", "default", "demo", "*", "save.dat"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(backups) != 1 {
+		t.Fatalf("backups = %#v, want one backed up save.dat", backups)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "default", "demo")); err != nil {
+		t.Fatalf("restored target directory missing: %v", err)
+	}
+	if len(runner.specs) != 1 {
+		t.Fatalf("ran %d commands, want 1", len(runner.specs))
+	}
+}
+
 func writeFile(path, content string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
