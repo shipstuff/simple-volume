@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -140,7 +141,10 @@ func (c *FailoverController) reconcilePVC(ctx context.Context, pvc *corev1.Persi
 		return fmt.Errorf("failover blocked: %s", decision.Reason)
 	}
 	previousActive := activeNodeFromPods(usingClaim, decision.TargetNode)
-	if err := c.promoteStorageBinding(ctx, pvc, decision.TargetNode, previousActive); err != nil {
+	if err := c.promoteStorageState(ctx, pvc, decision.TargetNode, previousActive); err != nil {
+		return err
+	}
+	if err := c.promoteNodeLabel(ctx, pvc, decision.TargetNode); err != nil {
 		return err
 	}
 	if err := c.patchDeploymentForStorageScheduling(ctx, pvc); err != nil {
@@ -197,7 +201,7 @@ func SelectFailoverTarget(pods []corev1.Pod, agents map[string]corev1.Pod, ready
 	return FailoverDecision{Promote: true, TargetNode: candidates[0].node, Reason: "FreshReplicaNode"}
 }
 
-func (c *FailoverController) promoteStorageBinding(ctx context.Context, pvc *corev1.PersistentVolumeClaim, targetNode, previousActive string) error {
+func (c *FailoverController) promoteStorageState(ctx context.Context, pvc *corev1.PersistentVolumeClaim, targetNode, previousActive string) error {
 	if pvc.Spec.VolumeName == "" {
 		return fmt.Errorf("pvc %s/%s has no bound volume", pvc.Namespace, pvc.Name)
 	}
@@ -213,7 +217,6 @@ func (c *FailoverController) promoteStorageBinding(ctx context.Context, pvc *cor
 	if previousActive != "" {
 		updatedPV.Annotations[AnnotationPreviousActiveNode] = previousActive
 	}
-	updatedPV.Spec.NodeAffinity = nodeAffinityForNode(targetNode)
 	if _, err := c.client.CoreV1().PersistentVolumes().Update(ctx, updatedPV, metav1.UpdateOptions{}); err != nil {
 		return err
 	}
@@ -233,6 +236,32 @@ func (c *FailoverController) promoteStorageBinding(ctx context.Context, pvc *cor
 	delete(updatedPVC.Annotations, AnnotationSelectedNode)
 	if _, err := c.client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Update(ctx, updatedPVC, metav1.UpdateOptions{}); err != nil {
 		return err
+	}
+	return nil
+}
+
+func (c *FailoverController) promoteNodeLabel(ctx context.Context, pvc *corev1.PersistentVolumeClaim, targetNode string) error {
+	nodes, err := c.client.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return err
+	}
+	label := RoleLabel(pvc.Namespace, pvc.Name)
+	for _, node := range nodes.Items {
+		updated := node.DeepCopy()
+		if updated.Labels == nil {
+			updated.Labels = make(map[string]string)
+		}
+		if node.Name == targetNode {
+			updated.Labels[label] = "active"
+		} else {
+			delete(updated.Labels, label)
+		}
+		if reflect.DeepEqual(node.Labels, updated.Labels) {
+			continue
+		}
+		if _, err := c.client.CoreV1().Nodes().Update(ctx, updated, metav1.UpdateOptions{}); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -264,6 +293,10 @@ func (c *FailoverController) patchDeploymentForStorageScheduling(ctx context.Con
 			updated.Spec.Template.Spec.NodeSelector = nil
 		}
 	}
+	if updated.Spec.Template.Spec.NodeSelector == nil {
+		updated.Spec.Template.Spec.NodeSelector = make(map[string]string)
+	}
+	updated.Spec.Template.Spec.NodeSelector[RoleLabel(pvc.Namespace, pvc.Name)] = "active"
 	if deploymentSchedulingEqual(deployment, updated) {
 		return nil
 	}
@@ -330,20 +363,6 @@ func volumeKey(namespace, volume string) string {
 	return namespace + "/" + volume
 }
 
-func nodeAffinityForNode(node string) *corev1.VolumeNodeAffinity {
-	return &corev1.VolumeNodeAffinity{
-		Required: &corev1.NodeSelector{
-			NodeSelectorTerms: []corev1.NodeSelectorTerm{{
-				MatchExpressions: []corev1.NodeSelectorRequirement{{
-					Key:      corev1.LabelHostname,
-					Operator: corev1.NodeSelectorOpIn,
-					Values:   []string{node},
-				}},
-			}},
-		},
-	}
-}
-
 func activeNodeFromPods(pods []corev1.Pod, promotedNode string) string {
 	for _, pod := range pods {
 		if pod.Spec.NodeName != "" && pod.Spec.NodeName != promotedNode {
@@ -393,7 +412,5 @@ func pvcKey(pvc *corev1.PersistentVolumeClaim) string {
 }
 
 func deploymentSchedulingEqual(before, after *appsv1.Deployment) bool {
-	return before.Spec.Template.Spec.NodeSelector == nil && after.Spec.Template.Spec.NodeSelector == nil ||
-		before.Spec.Template.Spec.NodeSelector != nil && after.Spec.Template.Spec.NodeSelector != nil &&
-			before.Spec.Template.Spec.NodeSelector[corev1.LabelHostname] == after.Spec.Template.Spec.NodeSelector[corev1.LabelHostname]
+	return reflect.DeepEqual(before.Spec.Template.Spec.NodeSelector, after.Spec.Template.Spec.NodeSelector)
 }

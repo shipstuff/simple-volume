@@ -90,13 +90,14 @@
   - Auto-promotion is opt-in per volume and controlled by per-volume grace/deadline fields.
   - Workload movement uses normal Kubernetes scheduling:
       - controller records the promoted active node in volume status/annotations
-      - controller updates bound PV nodeAffinity to the promoted node
+      - controller moves a per-volume active label to the promoted node
+      - workloads select the stable active label rather than a concrete hostname
       - controller removes stale PVC selected-node hints after failover
       - CSI refuses mounts on unauthorized nodes
       - pods reschedule naturally after node failure or eviction
 
-  - Optional workloadRef can be added for V0 demos to delete/restart stuck pods and remove old hard hostname node selectors
-    after promotion; production use can remain Kubernetes-eviction-driven until validated.
+  - Optional workloadRef can be added for V0 demos to delete/restart stuck pods and replace old hard hostname node selectors
+    with the stable active-label selector after promotion; production use can remain Kubernetes-eviction-driven until validated.
 
   ## Test Plan
 
