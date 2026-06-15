@@ -131,7 +131,7 @@ func CoalesceEvents(events []FileEvent, filter PathFilter) []FileEvent {
 }
 
 func BuildRcloneServeWebDAVCommand(rootPath, addr string, readOnly bool) CommandSpec {
-	args := []string{"serve", "webdav", rootPath, "--addr", addr, "--dir-cache-time", "1s"}
+	args := []string{"serve", "webdav", rootPath, "--config", "/dev/null", "--addr", addr, "--dir-cache-time", "1s"}
 	if readOnly {
 		args = append(args, "--read-only")
 	}
@@ -145,6 +145,7 @@ func BuildRcloneCopyToCommand(source SourceRef, sourcePath, targetPath string) (
 	}
 	args := []string{
 		"copyto",
+		"--config", "/dev/null",
 		"--webdav-url", strings.TrimRight(source.WebDAVURL, "/"),
 		"--webdav-vendor", "other",
 	}
@@ -161,6 +162,7 @@ func BuildRcloneCopyToCommand(source SourceRef, sourcePath, targetPath string) (
 func BuildRcloneFullSyncCommand(source SourceRef, sourceVolume, targetRoot string, filter PathFilter) CommandSpec {
 	args := []string{
 		"sync",
+		"--config", "/dev/null",
 		"--webdav-url", strings.TrimRight(source.WebDAVURL, "/"),
 		"--webdav-vendor", "other",
 	}
