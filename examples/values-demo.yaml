@@ -7,5 +7,11 @@ storagePools:
 sync:
   token: "demo-token"
 
+replication:
+  webdav:
+    enabled: true
+    port: 8081
+  fullResyncSchedule: "0 4 * * *"
+
 networkPolicy:
   enabled: false

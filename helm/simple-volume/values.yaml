@@ -35,6 +35,14 @@ sync:
   tokenSecretKey: token
   token: "change-me"
 
+replication:
+  webdav:
+    enabled: true
+    port: 8081
+  watch:
+    debounce: 5s
+  fullResyncSchedule: "0 4 * * *"
+
 networkPolicy:
   enabled: false
 

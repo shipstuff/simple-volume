@@ -18,7 +18,8 @@ spec:
       ports:
         - protocol: TCP
           port: 8080
+        - protocol: TCP
+          port: {{ .Values.replication.webdav.port }}
   policyTypes:
     - Ingress
 {{- end }}
-

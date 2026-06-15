@@ -31,6 +31,7 @@ type SimpleVolumeSpec struct {
 	StoragePool string          `json:"storagePool,omitempty"`
 	SizeBytes   int64           `json:"sizeBytes,omitempty"`
 	Replica     ReplicaSpec     `json:"replica,omitempty"`
+	Sync        SyncSpec        `json:"sync,omitempty"`
 	Promotion   PromotionSpec   `json:"promotion,omitempty"`
 	Access      AccessSpec      `json:"access,omitempty"`
 	WorkloadRef *WorkloadRef    `json:"workloadRef,omitempty"`
@@ -49,6 +50,21 @@ const (
 	SyncMethodRsync  SyncMethod = "rsync"
 	SyncMethodRclone SyncMethod = "rclone"
 )
+
+type SyncMode string
+
+const (
+	SyncModeWatch SyncMode = "watch"
+	SyncModeCron  SyncMode = "cron"
+)
+
+type SyncSpec struct {
+	Mode               SyncMode      `json:"mode,omitempty"`
+	IncludePaths       []string      `json:"includePaths,omitempty"`
+	ExcludePaths       []string      `json:"excludePaths,omitempty"`
+	Debounce           time.Duration `json:"debounce,omitempty"`
+	FullResyncSchedule string        `json:"fullResyncSchedule,omitempty"`
+}
 
 type PromotionSpec struct {
 	Automatic                   bool          `json:"automatic,omitempty"`

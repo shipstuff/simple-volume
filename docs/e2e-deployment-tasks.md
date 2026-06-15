@@ -68,7 +68,13 @@ kubectl exec deploy/simple-volume-demo -- sh -c 'echo ok >> /data/e2e.txt && cat
 - Persist `SimpleVolume` status with active node, replica nodes, freshness, and
   conditions.
 - Add agent heartbeat and pool capacity reporting.
-- Add agent-to-agent rsync/rclone execution over Kubernetes networking.
+- Add active-agent fsnotify watching for configured `sync.includePaths`.
+- Add debounced event batches sent from the active node to replica agents.
+- Add agent-to-agent rclone execution over Kubernetes networking using the
+  source agent's read-only WebDAV endpoint.
+- Add cron-style off-hours full resync from the controller as a safety net,
+  using `sync.fullResyncSchedule` such as `0 4 * * *`; do not create one
+  Kubernetes CronJob per volume in V0.
 - Make CSI node authorization read the controller/volume status instead of the
   current local static authorization scaffold.
 - Add per-volume node labels for active/healthy scheduling.
@@ -76,6 +82,24 @@ kubectl exec deploy/simple-volume-demo -- sh -c 'echo ok >> /data/e2e.txt && cat
 - Add an E2E test script that writes data, syncs it to a second node, simulates
   active-node loss, promotes a fresh replica, reschedules the demo pod, and
   verifies data on the promoted node.
+
+Recommended V0 replication policy shape:
+
+```yaml
+sync:
+  mode: watch
+  includePaths:
+    - savegame/**
+    - enshrouded_server.json
+  excludePaths:
+    - steamapps/**
+    - downloads/**
+  debounce: 5s
+  fullResyncSchedule: "0 4 * * *"
+```
+
+The include list is important for game servers whose PVC contains both durable
+save/config state and reconstructable game files.
 
 ## 6. Release Gate
 
@@ -95,4 +119,3 @@ And in-cluster:
 - demo PVC binds.
 - demo pod mounts and writes data.
 - non-empty uninitialized pool adoption fails by default.
-

@@ -12,9 +12,27 @@ The V0 scope is intentionally narrow:
 - node-agent DaemonSet path lifecycle and rsync/rclone execution helpers
 - thin CSI node bind-mount authorization
 - async single-writer promotion policy
+- watch-driven rclone/WebDAV replication primitives
 
 Replication logic does not run inside CSI. CSI is the Kubernetes mount boundary;
 the controller owns policy and the node agent owns local filesystem operations.
+
+## Replication Model
+
+The intended V0 replication path is watch-driven:
+
+- the active node-agent watches configured durable paths inside the active
+  volume
+- file events are debounced into batches
+- replica agents receive batch sync requests
+- replica agents pull changed files from the active agent's read-only rclone
+  WebDAV endpoint
+- an off-hours full resync schedule, such as `0 4 * * *`, provides a safety net
+  for missed events or agent restarts
+
+Volumes can replicate only selected folders/files. For game servers, this keeps
+large reconstructable game downloads out of the hot replication path while still
+protecting save/config state.
 
 ## Development
 

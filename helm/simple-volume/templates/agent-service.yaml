@@ -17,4 +17,6 @@ spec:
     - name: http
       port: 8080
       targetPort: http
-
+    - name: webdav
+      port: {{ .Values.replication.webdav.port }}
+      targetPort: webdav

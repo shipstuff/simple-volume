@@ -8,6 +8,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
+	"time"
 
 	"github.com/shipstuff/simple-volume/internal/agent"
 	"github.com/shipstuff/simple-volume/internal/api/v1alpha1"
@@ -48,14 +50,20 @@ func runAgent(args []string) {
 	poolName := fs.String("pool-name", getenv("SIMPLE_VOLUME_POOL_NAME", "default"), "storage pool name")
 	poolPath := fs.String("pool-path", getenv("SIMPLE_VOLUME_POOL_PATH", "/var/lib/simple-volume"), "host-mounted storage pool path")
 	allowNonEmptyPool := fs.Bool("allow-non-empty-pool", getenv("SIMPLE_VOLUME_ALLOW_NON_EMPTY_POOL", "") == "true", "allow adopting a non-empty uninitialized storage pool")
+	webdavEnabled := fs.Bool("webdav-enabled", getenv("SIMPLE_VOLUME_WEBDAV_ENABLED", "true") == "true", "serve the pool root over read-only rclone WebDAV")
+	webdavAddr := fs.String("webdav-addr", getenv("SIMPLE_VOLUME_WEBDAV_ADDR", ":8081"), "rclone WebDAV listen address")
 	token := fs.String("token", os.Getenv("SIMPLE_VOLUME_TOKEN"), "bearer token for sync endpoints")
 	_ = fs.Parse(args)
 
 	if err := agent.EnsurePool(agent.Pool{Name: *poolName, Path: *poolPath}, *allowNonEmptyPool); err != nil {
 		log.Fatalf("initialize storage pool: %v", err)
 	}
+	if *webdavEnabled {
+		startBackgroundCommand(context.Background(), agent.BuildRcloneServeWebDAVCommand(*poolPath, *webdavAddr, true))
+	}
 
 	auth := agent.TokenAuthorizer{Token: *token}
+	pool := agent.Pool{Name: *poolName, Path: *poolPath}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok\n")) })
 	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok\n")) })
@@ -94,8 +102,23 @@ func runAgent(args []string) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]string{"path": path})
 	})
+	mux.HandleFunc("/replication/sync-batch", agent.SyncBatchHandler(pool, auth, agent.ExecRunner{}, 10*time.Minute))
 	log.Printf("starting simple-volume agent pool=%s path=%s addr=%s", *poolName, *poolPath, *addr)
 	log.Fatal(http.ListenAndServe(*addr, mux))
+}
+
+func startBackgroundCommand(ctx context.Context, spec agent.CommandSpec) {
+	cmd := exec.CommandContext(ctx, spec.Name, spec.Args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		log.Fatalf("start %s: %v", spec.Name, err)
+	}
+	go func() {
+		if err := cmd.Wait(); err != nil {
+			log.Fatalf("%s exited: %v", spec.Name, err)
+		}
+	}()
 }
 
 func runCSINode(args []string) {

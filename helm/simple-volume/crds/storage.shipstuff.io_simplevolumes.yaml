@@ -41,6 +41,24 @@ spec:
                         type: string
                     replicaCount:
                       type: integer
+                sync:
+                  type: object
+                  properties:
+                    mode:
+                      type: string
+                      enum: ["watch", "cron"]
+                    includePaths:
+                      type: array
+                      items:
+                        type: string
+                    excludePaths:
+                      type: array
+                      items:
+                        type: string
+                    debounce:
+                      type: string
+                    fullResyncSchedule:
+                      type: string
                 promotion:
                   type: object
                   properties:
@@ -83,4 +101,3 @@ spec:
         - name: Active
           type: string
           jsonPath: .status.activeNode
-
