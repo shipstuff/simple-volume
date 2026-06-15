@@ -8,16 +8,22 @@ freshness policy, and promotion state.
 ## Why
 
 We want local-disk performance for workloads such as game servers while still
-having a Kubernetes-native recovery path when a node fails. Existing storage
-options did not match that shape cleanly: VolSync is useful as a copy primitive
-but does not own promotion or scheduling policy, Longhorn is a broader
-replicated block-storage layer, and OpenEBS/Ceph add more storage-platform
-surface than this use case needs.
+having a Kubernetes-native recovery path when a node fails. Most existing
+options are overkill for that shape. VolSync is useful as a copy primitive but
+does not own promotion or scheduling policy. Longhorn was the strongest tested
+alternative, but it added many containers to already resource-constrained nodes.
+OpenEBS and Ceph/Rook add even more storage-platform surface than this use case
+needs.
 
 `simple-volume` keeps the hot path local, uses PVC/CSI so applications do not
 mount raw `hostPath`, replicates selected durable paths asynchronously, and
-promotes only replicas that are fresh enough for the workload's RPO. See
-[docs/why-simple-volume.md](docs/why-simple-volume.md) for the full design
+promotes only replicas that are fresh enough for the workload's RPO. The trade
+off is intentional: this is ongoing backup plus automatic failover to the
+freshest acceptable copy on another node, not synchronous HA storage. That is
+lightweight, covers the fundamental failure-recovery features, and is an
+acceptable fit for many single-writer workloads.
+
+See [docs/why-simple-volume.md](docs/why-simple-volume.md) for the full design
 rationale, replication model, and storage options we evaluated.
 
 ## V0 Scope
