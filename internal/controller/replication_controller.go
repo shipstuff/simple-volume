@@ -44,9 +44,10 @@ type ReplicationControllerConfig struct {
 }
 
 type ReplicationController struct {
-	client kubernetes.Interface
-	cfg    ReplicationControllerConfig
-	http   *http.Client
+	client   kubernetes.Interface
+	cfg      ReplicationControllerConfig
+	http     *http.Client
+	failover *FailoverController
 
 	mu              sync.Mutex
 	startedWatches  map[string]string
@@ -90,7 +91,7 @@ func NewReplicationController(client kubernetes.Interface, cfg ReplicationContro
 	if cfg.AgentLabelSelector == "" {
 		cfg.AgentLabelSelector = "app.kubernetes.io/component=node"
 	}
-	return &ReplicationController{
+	controller := &ReplicationController{
 		client:          client,
 		cfg:             cfg,
 		http:            &http.Client{Timeout: cfg.HTTPTimeout},
@@ -98,6 +99,8 @@ func NewReplicationController(client kubernetes.Interface, cfg ReplicationContro
 		completedSyncs:  make(map[string]bool),
 		lastScheduledOn: make(map[string]string),
 	}
+	controller.failover = NewFailoverController(client, cfg)
+	return controller
 }
 
 func RunReplicationController(ctx context.Context, cfg ReplicationControllerConfig) error {
@@ -131,6 +134,7 @@ func (c *ReplicationController) Run(ctx context.Context) error {
 }
 
 func (c *ReplicationController) Reconcile(ctx context.Context) error {
+	now := time.Now()
 	token, err := c.syncToken(ctx)
 	if err != nil {
 		return err
@@ -140,8 +144,13 @@ func (c *ReplicationController) Reconcile(ctx context.Context) error {
 		return err
 	}
 	for _, item := range desired {
-		if err := c.reconcileOne(ctx, item, token, time.Now()); err != nil {
+		if err := c.reconcileOne(ctx, item, token, now); err != nil {
 			log.Printf("reconcile replication %s/%s: %v", item.Namespace, item.ClaimName, err)
+		}
+	}
+	if c.failover != nil {
+		if err := c.failover.Reconcile(ctx, now); err != nil {
+			log.Printf("failover reconcile failed: %v", err)
 		}
 	}
 	return nil

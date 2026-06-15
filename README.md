@@ -89,6 +89,22 @@ The current schedule parser intentionally supports exact minute/hour cron
 windows such as `0 4 * * *`; ranges and step expressions are left for the
 controller-runtime implementation.
 
+Opt-in V0 failover is also PVC annotation driven and currently supports
+Deployment workloads:
+
+```yaml
+metadata:
+  annotations:
+    simple-volume.shipstuff.io/failover-enabled: "true"
+    simple-volume.shipstuff.io/failover-workload-kind: "Deployment"
+    simple-volume.shipstuff.io/failover-workload-name: "my-writer"
+    simple-volume.shipstuff.io/failover-grace-period: "1m"
+```
+
+When no healthy pod using the claim is running on a Ready node for the grace
+period, the controller selects a ready replica node, patches the Deployment's
+`kubernetes.io/hostname` node selector, and deletes stale pods using the claim.
+
 ## Development
 
 ```bash
