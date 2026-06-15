@@ -17,6 +17,9 @@ The V0 scope is intentionally narrow:
 Replication logic does not run inside CSI. CSI is the Kubernetes mount boundary;
 the controller owns policy and the node agent owns local filesystem operations.
 
+See [docs/why-simple-volume.md](docs/why-simple-volume.md) for the design
+rationale, replication model, and storage options we evaluated.
+
 ## Replication Model
 
 The intended V0 replication path is watch-driven:
