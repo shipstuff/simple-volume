@@ -16,3 +16,11 @@ func TestRoleLabel(t *testing.T) {
 		t.Fatalf("role label = %q, want %q", got, want)
 	}
 }
+
+func TestCandidateLabel(t *testing.T) {
+	got := CandidateLabel("games", "windrose-state")
+	want := "simple-volume.shipstuff.io/games.windrose-state-candidate"
+	if got != want {
+		t.Fatalf("candidate label = %q, want %q", got, want)
+	}
+}

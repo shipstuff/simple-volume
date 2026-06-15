@@ -37,6 +37,10 @@ func RoleLabel(namespace, name string) string {
 	return fmt.Sprintf("%s/%s-role", LabelPrefix, VolumeLabelID(namespace, name))
 }
 
+func CandidateLabel(namespace, name string) string {
+	return fmt.Sprintf("%s/%s-candidate", LabelPrefix, VolumeLabelID(namespace, name))
+}
+
 func PoolLabel(pool string) string {
 	return fmt.Sprintf("%s/pool-%s", LabelPrefix, VolumeLabelID("", pool))
 }

@@ -135,11 +135,16 @@ metadata:
     simple-volume.shipstuff.io/failover-workload-name: "my-writer"
     simple-volume.shipstuff.io/failover-grace-period: "1m"
     simple-volume.shipstuff.io/failover-max-staleness: "2m"
+    simple-volume.shipstuff.io/failover-node-priority: "fresno-west-1,sf-west-1,kapolei-pacific-1"
 ```
 
 When no healthy pod using the claim is running on a Ready, schedulable node for
-the grace period, the controller selects a ready replica node whose last
-successful sync is within `failover-max-staleness`, records
+the grace period, the controller selects an eligible replica node whose last
+successful sync is within `failover-max-staleness`. If
+`failover-node-priority` is set, the controller walks that list first and picks
+the first fresh, healthy, Ready, schedulable replica that passes a conservative
+CPU/memory request fit check. If no preferred node qualifies, it falls back to
+the freshest eligible replica. Promotion records
 `simple-volume.shipstuff.io/active-node` on the PV/PVC, removes the stale
 Kubernetes `volume.kubernetes.io/selected-node` PVC annotation, moves the
 volume's active node label to the promoted node, and deletes stale pods using
@@ -154,25 +159,27 @@ move its existing local volume into `.simple-volume-backups/` before restoring
 from the current leader. That keeps a rollback copy of the pre-restore local
 state while avoiding split-brain.
 
-## Next Revision
+The controller also maintains a per-volume candidate label on fresh eligible
+replica nodes:
 
-The next promotion pass should add operator preference and lightweight resource
-awareness without trying to reimplement the Kubernetes scheduler:
+```yaml
+simple-volume.shipstuff.io/default.mydata-candidate: "true"
+```
+
+Candidate labels are derived state. They are removed from offline, stale, or
+resource-ineligible nodes and should not be treated as the source of truth. The
+PV/PVC active-node annotations remain the operator-facing status boundary, and
+CSI still validates that a node is authorized before mounting.
+
+## Future Scheduling Work
+
+The next scheduling pass should let Kubernetes choose among fresh candidates
+without trying to reimplement the scheduler:
 
 - keep storage pool membership operator-defined through the node-agent
   DaemonSet placement
 - require consuming workloads to carry the appropriate storage-pool or
   per-volume scheduling selectors/affinity in their own manifests
-- accept a failover priority list such as
-  ```yaml
-  simple-volume.shipstuff.io/failover-node-priority: "fresno-west-1,sf-west-1,kapolei-pacific-1"
-  ```
-- walk that list first and pick the first replica that is fresh, healthy, Ready,
-  schedulable, and eligible for the pool
-- fall back to the current freshest-replica behavior when none of the preferred
-  nodes qualify
-- add a conservative resource-fit precheck from workload pod requests against
-  node allocatable capacity before moving the active label
 - if Kubernetes still leaves the replacement pod Pending, retry the next
   eligible replica rather than treating CSI mount failure as the promotion
   trigger

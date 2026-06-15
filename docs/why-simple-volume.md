@@ -108,12 +108,14 @@ mount path.
 PV/PVC annotations are status and debugging signals. They are useful for
 operators, but they do not reschedule pods by themselves.
 
-For v0, promotion works through mutable node labels and normal Kubernetes pod
+Promotion works through mutable node labels and normal Kubernetes pod
 scheduling:
 
 - the controller records active/previous active node annotations on the PV/PVC
 - the controller removes stale PVC `volume.kubernetes.io/selected-node` hints
 - the controller moves the per-volume active-node label to the promoted node
+- the controller maintains per-volume candidate labels on fresh eligible
+  replica nodes
 - the workload selects the stable active-node label instead of a fixed hostname
 - the controller deletes stale pods when needed, then Kubernetes schedules the
   replacement pod to the currently labeled active node
@@ -122,14 +124,15 @@ scheduling:
 This avoids relying on mutable PV `nodeAffinity` after a PV has already been
 bound.
 
-The next revision should add a best-effort failover priority list and a
-conservative resource-fit precheck. The controller should still promote only
-fresh replicas, but within that eligible set it can prefer operator-specified
-nodes first, then fall back to the current freshest-replica selection. Kubernetes
-should remain the final scheduler; `simple-volume` should avoid using CSI mount
-failures as the normal way to discover that a node cannot run the workload.
-Explicit workload selectors/affinity should be the default adoption path;
-webhook-based injection can wait until there is a clear need.
+The controller promotes only fresh replicas. Within that eligible set it can
+prefer operator-specified nodes from
+`simple-volume.shipstuff.io/failover-node-priority`, then fall back to the
+freshest-replica selection. Before moving the active label it also runs a
+conservative CPU/memory request fit check against node allocatable capacity.
+Kubernetes should remain the final scheduler; `simple-volume` should avoid using
+CSI mount failures as the normal way to discover that a node cannot run the
+workload. Explicit workload selectors/affinity should be the default adoption
+path; webhook-based injection can wait until there is a clear need.
 
 ## Storage Options Evaluated
 

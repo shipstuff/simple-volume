@@ -156,9 +156,9 @@ host filesystem enforces its own limits.
 - Node-agent DaemonSet placement defines the default storage-capable node set.
 - Production workload adoption requires a later explicit rollout plan, restore drill, and failure-mode test.
 
-## Next Revision
+## Post-v0 Failover Selection
 
-- Add a failover node priority annotation or spec field.
+- Added `simple-volume.shipstuff.io/failover-node-priority` as a PVC annotation.
 - Keep storage pool membership defined by node-agent DaemonSet placement at
   install time.
 - Keep workload adoption explicit: consuming charts should carry the matching
@@ -167,9 +167,10 @@ host filesystem enforces its own limits.
   and schedulable node.
 - Fall back to the current freshest-replica behavior if no preferred node is
   eligible.
-- Add a conservative resource-fit precheck based on pod requests and node
+- Added a conservative resource-fit precheck based on pod requests and node
   allocatable capacity. This should catch obvious bad promotions without trying
   to perfectly duplicate scheduler behavior.
+- Added per-volume candidate labels for fresh eligible replicas.
 - Keep Kubernetes as the final scheduling authority. If the replacement pod
   stays Pending after promotion, the controller can retry another eligible
   replica; CSI mount failure should not be the normal promotion trigger.
