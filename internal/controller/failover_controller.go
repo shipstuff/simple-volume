@@ -183,6 +183,9 @@ func failoverGracePeriod(pvc *corev1.PersistentVolumeClaim) time.Duration {
 func readyNodeSet(nodes []corev1.Node) map[string]bool {
 	out := make(map[string]bool)
 	for _, node := range nodes {
+		if node.Spec.Unschedulable {
+			continue
+		}
 		for _, condition := range node.Status.Conditions {
 			if condition.Type == corev1.NodeReady && condition.Status == corev1.ConditionTrue {
 				out[node.Name] = true

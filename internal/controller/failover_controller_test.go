@@ -71,6 +71,18 @@ func TestFailoverControllerPatchesDeploymentAndDeletesStalePod(t *testing.T) {
 	}
 }
 
+func TestReadyNodeSetExcludesUnschedulableNodes(t *testing.T) {
+	node := readyNode("kapolei-pacific-1", true)
+	node.Spec.Unschedulable = true
+	nodes := readyNodeSet([]corev1.Node{*node, *readyNode("sf-west-1", true)})
+	if nodes["kapolei-pacific-1"] {
+		t.Fatal("unschedulable ready node should be excluded")
+	}
+	if !nodes["sf-west-1"] {
+		t.Fatal("schedulable ready node should be included")
+	}
+}
+
 func deployment(name, namespace, node string) *appsv1.Deployment {
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},

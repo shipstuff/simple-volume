@@ -101,9 +101,10 @@ metadata:
     simple-volume.shipstuff.io/failover-grace-period: "1m"
 ```
 
-When no healthy pod using the claim is running on a Ready node for the grace
-period, the controller selects a ready replica node, patches the Deployment's
-`kubernetes.io/hostname` node selector, and deletes stale pods using the claim.
+When no healthy pod using the claim is running on a Ready, schedulable node for
+the grace period, the controller selects a ready replica node, patches the
+Deployment's `kubernetes.io/hostname` node selector, and deletes stale pods
+using the claim.
 
 ## Development
 
