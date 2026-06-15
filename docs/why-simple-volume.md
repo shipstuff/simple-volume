@@ -71,10 +71,17 @@ v0 should not require manually maintaining a node list for every volume.
 - a distributed filesystem
 - a replacement for database-native replication
 - a backup system by itself
+- a disk quota or PV capacity enforcement layer
 - a generic Ceph/Longhorn/OpenEBS alternative
 
 Replication copies current state. Backups still need retention so a bad write,
 delete, or corrupt save does not simply replicate everywhere.
+
+Like Kubernetes `local-path` style storage, v0 records the requested PVC size
+but does not enforce it as a filesystem quota. The size is still useful for
+Kubernetes API shape, placement decisions, and operator visibility. Actual disk
+use is bounded by the backing local pool unless the host filesystem provides
+separate quota enforcement.
 
 ## Why CSI At All
 
@@ -108,6 +115,13 @@ scheduling:
 
 This avoids relying on mutable PV `nodeAffinity` after a PV has already been
 bound.
+
+The next revision should add a best-effort failover priority list and a
+conservative resource-fit precheck. The controller should still promote only
+fresh replicas, but within that eligible set it can prefer operator-specified
+nodes first, then fall back to the current freshest-replica selection. Kubernetes
+should remain the final scheduler; `simple-volume` should avoid using CSI mount
+failures as the normal way to discover that a node cannot run the workload.
 
 ## Storage Options Evaluated
 

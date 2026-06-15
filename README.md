@@ -28,7 +28,7 @@ rationale, replication model, and storage options we evaluated.
 
 ## V0 Scope
 
-The V0 scope is intentionally narrow:
+The V0 scope is intentionally narrow and complete enough for initial release:
 
 - dynamic PVC provisioning into logical SimpleVolumes
 - chart-configured local storage pools
@@ -36,9 +36,14 @@ The V0 scope is intentionally narrow:
 - thin CSI node bind-mount authorization
 - async single-writer promotion policy
 - watch-driven rclone/WebDAV replication primitives
+- requested PVC size is recorded but not enforced as a disk quota
 
 Replication logic does not run inside CSI. CSI is the Kubernetes mount boundary;
 the controller owns policy and the node agent owns local filesystem operations.
+Like `local-path`, v0 does not enforce PV capacity at the filesystem layer. The
+PVC request is used for Kubernetes API shape, placement decisions, and operator
+visibility; workloads can still consume available space in the backing local
+pool unless the host filesystem enforces its own limits.
 
 ## Replication Model
 
@@ -141,6 +146,25 @@ old active rejoins as a replica target, the next full sync asks that agent to
 move its existing local volume into `.simple-volume-backups/` before restoring
 from the current leader. That keeps a rollback copy of the pre-restore local
 state while avoiding split-brain.
+
+## Next Revision
+
+The next promotion pass should add operator preference and lightweight resource
+awareness without trying to reimplement the Kubernetes scheduler:
+
+- accept a failover priority list such as
+  ```yaml
+  simple-volume.shipstuff.io/failover-node-priority: "fresno-west-1,sf-west-1,kapolei-pacific-1"
+  ```
+- walk that list first and pick the first replica that is fresh, healthy, Ready,
+  schedulable, and eligible for the pool
+- fall back to the current freshest-replica behavior when none of the preferred
+  nodes qualify
+- add a conservative resource-fit precheck from workload pod requests against
+  node allocatable capacity before moving the active label
+- if Kubernetes still leaves the replacement pod Pending, retry the next
+  eligible replica rather than treating CSI mount failure as the promotion
+  trigger
 
 ## Development
 
