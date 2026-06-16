@@ -228,13 +228,6 @@ func (s *Server) NodeUnpublishVolume(_ context.Context, req *csipb.NodeUnpublish
 func (s *Server) volumePath(volumeID string, volumeContext map[string]string) (string, error) {
 	namespace := strings.TrimSpace(volumeContext[volumeContextPVCNamespace])
 	if namespace == "" {
-		path, ok, err := s.existingNamespaceVolumePath(volumeID)
-		if err != nil {
-			return "", err
-		}
-		if ok {
-			return path, nil
-		}
 		return "", fmt.Errorf("PVC namespace volume context is required for volume %s", volumeID)
 	}
 	return agent.EnsureVolumePath(agent.VolumePath{
@@ -242,39 +235,6 @@ func (s *Server) volumePath(volumeID string, volumeContext map[string]string) (s
 		Namespace: namespace,
 		Name:      volumeID,
 	}, 0o755)
-}
-
-func (s *Server) existingNamespaceVolumePath(volumeID string) (string, bool, error) {
-	pool := agent.Pool{Name: s.poolName, Path: s.poolPath}.Clean()
-	entries, err := os.ReadDir(pool.Path)
-	if os.IsNotExist(err) {
-		return "", false, nil
-	}
-	if err != nil {
-		return "", false, err
-	}
-	var match string
-	for _, entry := range entries {
-		if !entry.IsDir() || entry.Name() == "default" || strings.HasPrefix(entry.Name(), ".") {
-			continue
-		}
-		candidate := filepath.Join(pool.Path, entry.Name(), volumeID)
-		info, err := os.Stat(candidate)
-		if os.IsNotExist(err) {
-			continue
-		}
-		if err != nil {
-			return "", false, err
-		}
-		if !info.IsDir() {
-			continue
-		}
-		if match != "" {
-			return "", false, fmt.Errorf("multiple namespace paths found for volume %s", volumeID)
-		}
-		match = candidate
-	}
-	return match, match != "", nil
 }
 
 func controllerCapability(capability csipb.ControllerServiceCapability_RPC_Type) *csipb.ControllerServiceCapability {

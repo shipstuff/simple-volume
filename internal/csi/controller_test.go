@@ -96,22 +96,6 @@ func TestServerVolumePathRequiresNamespaceForNewPV(t *testing.T) {
 	}
 }
 
-func TestServerVolumePathFindsExistingNamespaceForOldPV(t *testing.T) {
-	pool := t.TempDir()
-	existing := filepath.Join(pool, "games", "pvc-123")
-	if err := os.MkdirAll(existing, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	s := &Server{poolName: "default", poolPath: pool}
-	path, err := s.volumePath("pvc-123", nil)
-	if err != nil {
-		t.Fatalf("volumePath returned error: %v", err)
-	}
-	if path != existing {
-		t.Fatalf("path = %q, want %q", path, existing)
-	}
-}
-
 func TestApplyVolumeMountGroup(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "data")
