@@ -202,6 +202,9 @@ helm upgrade --install simple-volume ./helm/simple-volume \
   --create-namespace
 ```
 
+The chart uses the standard CSI external-provisioner metadata path so
+`simple-volume` can bind storage to the source PVC namespace/name.
+
 Image publishing is handled by `.github/workflows/publish-images.yml`.
 Pushes to `main` publish `latest` and `sha-*` tags to
 `ghcr.io/shipstuff/simple-volume`; `v*` tags publish semver image tags.

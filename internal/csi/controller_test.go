@@ -10,6 +10,8 @@ import (
 
 	csipb "github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/shipstuff/simple-volume/internal/controller"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func TestCreateVolumeReturnsLogicalHandle(t *testing.T) {
@@ -54,6 +56,19 @@ func TestServerCreateVolumeIncludesPVCContext(t *testing.T) {
 	}
 }
 
+func TestServerCreateVolumeRequiresPVCMetadata(t *testing.T) {
+	s := &Server{poolName: "default"}
+	_, err := s.CreateVolume(context.Background(), &csipb.CreateVolumeRequest{
+		Name: "pvc-123",
+	})
+	if err == nil {
+		t.Fatal("CreateVolume returned nil error, want missing metadata error")
+	}
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("CreateVolume error code = %s, want %s", status.Code(err), codes.FailedPrecondition)
+	}
+}
+
 func TestServerVolumePathUsesPVCNamespace(t *testing.T) {
 	pool := t.TempDir()
 	s := &Server{poolName: "default", poolPath: pool}
@@ -66,6 +81,18 @@ func TestServerVolumePathUsesPVCNamespace(t *testing.T) {
 	want := filepath.Join(pool, "games", "pvc-123")
 	if path != want {
 		t.Fatalf("path = %q, want %q", path, want)
+	}
+}
+
+func TestServerVolumePathRequiresNamespaceForNewPV(t *testing.T) {
+	pool := t.TempDir()
+	s := &Server{poolName: "default", poolPath: pool}
+	_, err := s.volumePath("pvc-123", nil)
+	if err == nil {
+		t.Fatal("volumePath returned nil error, want missing namespace error")
+	}
+	if _, statErr := os.Stat(filepath.Join(pool, "default", "pvc-123")); !os.IsNotExist(statErr) {
+		t.Fatalf("default namespace path stat err = %v, want not exist", statErr)
 	}
 }
 

@@ -128,8 +128,11 @@ func (s *Server) CreateVolume(_ context.Context, req *csipb.CreateVolumeRequest)
 	}
 	pvcNamespace := strings.TrimSpace(req.GetParameters()[provisionerPVCNamespace])
 	pvcName := strings.TrimSpace(req.GetParameters()[provisionerPVCName])
-	if pvcName == "" {
-		pvcName = req.GetName()
+	if pvcNamespace == "" || pvcName == "" {
+		return nil, status.Errorf(
+			codes.FailedPrecondition,
+			"PVC metadata is required; configure external-provisioner with --extra-create-metadata",
+		)
 	}
 	return &csipb.CreateVolumeResponse{
 		Volume: &csipb.Volume{
@@ -232,6 +235,7 @@ func (s *Server) volumePath(volumeID string, volumeContext map[string]string) (s
 		if ok {
 			return path, nil
 		}
+		return "", fmt.Errorf("PVC namespace volume context is required for volume %s", volumeID)
 	}
 	return agent.EnsureVolumePath(agent.VolumePath{
 		Pool:      agent.Pool{Name: s.poolName, Path: s.poolPath},
