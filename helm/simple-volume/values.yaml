@@ -15,6 +15,24 @@ controller:
 
 node:
   resources: {}
+  agent:
+    resources:
+      requests:
+        memory: 32Mi
+      limits:
+        memory: 128Mi
+  csiNode:
+    resources:
+      requests:
+        memory: 32Mi
+      limits:
+        memory: 128Mi
+  registrar:
+    resources:
+      requests:
+        memory: 16Mi
+      limits:
+        memory: 64Mi
   registrarImage: registry.k8s.io/sig-storage/csi-node-driver-registrar:v2.13.0
   nodeSelector: {}
   tolerations: []

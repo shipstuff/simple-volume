@@ -1,4 +1,7 @@
 {{- $pool := index .Values.storagePools 0 -}}
+{{- $agentResources := default .Values.node.resources .Values.node.agent.resources -}}
+{{- $csiNodeResources := default .Values.node.resources .Values.node.csiNode.resources -}}
+{{- $registrarResources := default .Values.node.resources .Values.node.registrar.resources -}}
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
@@ -66,7 +69,7 @@ spec:
               path: /readyz
               port: http
           resources:
-            {{- toYaml .Values.node.resources | nindent 12 }}
+            {{- toYaml $agentResources | nindent 12 }}
         - name: csi-node
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
@@ -94,7 +97,7 @@ spec:
             - name: pool-default
               mountPath: /pools/{{ $pool.name }}
           resources:
-            {{- toYaml .Values.node.resources | nindent 12 }}
+            {{- toYaml $csiNodeResources | nindent 12 }}
         - name: node-driver-registrar
           image: {{ .Values.node.registrarImage }}
           args:
@@ -106,6 +109,8 @@ spec:
               mountPath: /csi
             - name: registration-dir
               mountPath: /registration
+          resources:
+            {{- toYaml $registrarResources | nindent 12 }}
       volumes:
         - name: plugin-dir
           hostPath:

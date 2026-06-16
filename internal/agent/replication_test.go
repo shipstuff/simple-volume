@@ -98,6 +98,7 @@ func TestBuildRcloneCopyToCommand(t *testing.T) {
 	if spec.Args[len(spec.Args)-1] != filepath.Join("/target", "save", "a.txt") {
 		t.Fatalf("target arg = %q; args=%#v", spec.Args[len(spec.Args)-1], spec.Args)
 	}
+	assertLowMemoryRcloneArgs(t, spec.Args)
 }
 
 func TestBuildRcloneFullSyncCommandUsesOrderedFilters(t *testing.T) {
@@ -117,6 +118,29 @@ func TestBuildRcloneFullSyncCommandUsesOrderedFilters(t *testing.T) {
 	for _, part := range want {
 		if !containsArg(spec.Args, part) {
 			t.Fatalf("args missing %q: %#v", part, spec.Args)
+		}
+	}
+	assertLowMemoryRcloneArgs(t, spec.Args)
+}
+
+func assertLowMemoryRcloneArgs(t *testing.T, args []string) {
+	t.Helper()
+	want := map[string]string{
+		"--transfers":            "1",
+		"--checkers":             "1",
+		"--buffer-size":          "0",
+		"--multi-thread-streams": "0",
+	}
+	for flag, value := range want {
+		found := false
+		for i := 0; i < len(args)-1; i++ {
+			if args[i] == flag && args[i+1] == value {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("args missing %s %s: %#v", flag, value, args)
 		}
 	}
 }

@@ -175,6 +175,7 @@ func BuildRcloneCopyToCommand(source SourceRef, sourcePath, targetPath string) (
 		"--webdav-url", strings.TrimRight(source.WebDAVURL, "/"),
 		"--webdav-vendor", "other",
 	}
+	args = appendRcloneLowMemoryArgs(args)
 	if source.User != "" {
 		args = append(args, "--webdav-user", source.User)
 	}
@@ -192,6 +193,7 @@ func BuildRcloneFullSyncCommand(source SourceRef, sourceVolume, targetRoot strin
 		"--webdav-url", strings.TrimRight(source.WebDAVURL, "/"),
 		"--webdav-vendor", "other",
 	}
+	args = appendRcloneLowMemoryArgs(args)
 	if source.User != "" {
 		args = append(args, "--webdav-user", source.User)
 	}
@@ -209,6 +211,15 @@ func BuildRcloneFullSyncCommand(source SourceRef, sourceVolume, targetRoot strin
 	}
 	args = append(args, ":webdav:"+strings.Trim(sourceVolume, "/"), targetRoot)
 	return CommandSpec{Name: "rclone", Args: args}
+}
+
+func appendRcloneLowMemoryArgs(args []string) []string {
+	return append(args,
+		"--transfers", "1",
+		"--checkers", "1",
+		"--buffer-size", "0",
+		"--multi-thread-streams", "0",
+	)
 }
 
 func ApplyEventBatch(ctx context.Context, runner Runner, pool Pool, batch EventBatch) error {
