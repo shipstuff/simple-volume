@@ -7,7 +7,12 @@ namespaceOverride: ""
 
 controller:
   replicas: 1
-  resources: {}
+  resources:
+    requests:
+      cpu: 10m
+      memory: 32Mi
+    limits:
+      memory: 128Mi
   provisionerImage: registry.k8s.io/sig-storage/csi-provisioner:v5.2.0
   replicationController:
     enabled: true
@@ -18,18 +23,21 @@ node:
   agent:
     resources:
       requests:
-        memory: 32Mi
+        cpu: 10m
+        memory: 64Mi
       limits:
         memory: 128Mi
   csiNode:
     resources:
       requests:
-        memory: 32Mi
+        cpu: 10m
+        memory: 16Mi
       limits:
-        memory: 128Mi
+        memory: 64Mi
   registrar:
     resources:
       requests:
+        cpu: 10m
         memory: 16Mi
       limits:
         memory: 64Mi

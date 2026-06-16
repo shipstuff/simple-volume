@@ -73,6 +73,8 @@ spec:
           volumeMounts:
             - name: csi-socket
               mountPath: /csi
+          resources:
+            {{- toYaml .Values.controller.resources | nindent 12 }}
       volumes:
         - name: csi-socket
           emptyDir: {}
