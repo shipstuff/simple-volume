@@ -15,6 +15,16 @@ import (
 	"github.com/shipstuff/simple-volume/internal/agent"
 )
 
+func TestNewReplicationControllerDefaultsHTTPTimeoutToFullSyncWindow(t *testing.T) {
+	controller := NewReplicationController(fake.NewSimpleClientset(), ReplicationControllerConfig{})
+	if controller.cfg.HTTPTimeout != time.Hour {
+		t.Fatalf("HTTPTimeout = %v, want %v", controller.cfg.HTTPTimeout, time.Hour)
+	}
+	if controller.http.Timeout != time.Hour {
+		t.Fatalf("http client timeout = %v, want %v", controller.http.Timeout, time.Hour)
+	}
+}
+
 func TestDesiredReplicationsDiscoversActiveAndReplicaAgents(t *testing.T) {
 	storageClass := "simple-volume"
 	client := fake.NewSimpleClientset(

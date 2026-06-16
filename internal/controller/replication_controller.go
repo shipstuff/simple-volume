@@ -91,7 +91,7 @@ func NewReplicationController(client kubernetes.Interface, cfg ReplicationContro
 		cfg.ReconcileInterval = 30 * time.Second
 	}
 	if cfg.HTTPTimeout <= 0 {
-		cfg.HTTPTimeout = 30 * time.Second
+		cfg.HTTPTimeout = time.Hour
 	}
 	if cfg.AgentLabelSelector == "" {
 		cfg.AgentLabelSelector = "app.kubernetes.io/component=node"
