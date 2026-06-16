@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -14,6 +15,15 @@ type recordingRunner struct {
 func (r *recordingRunner) Run(_ context.Context, spec CommandSpec) error {
 	r.specs = append(r.specs, spec)
 	return nil
+}
+
+func containsArg(args []string, want string) bool {
+	for _, arg := range args {
+		if arg == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestPathFilterIncludesAndExcludes(t *testing.T) {
@@ -87,6 +97,27 @@ func TestBuildRcloneCopyToCommand(t *testing.T) {
 	}
 	if spec.Args[len(spec.Args)-1] != filepath.Join("/target", "save", "a.txt") {
 		t.Fatalf("target arg = %q; args=%#v", spec.Args[len(spec.Args)-1], spec.Args)
+	}
+}
+
+func TestBuildRcloneFullSyncCommandUsesOrderedFilters(t *testing.T) {
+	spec := BuildRcloneFullSyncCommand(SourceRef{WebDAVURL: "http://source:8081"}, "games/demo", "/target", PathFilter{
+		IncludePaths: []string{"steam-root/windrose/WindowsServer/R5/Saved/**"},
+		ExcludePaths: []string{"steam-root/windrose/WindowsServer/R5/Saved/Logs/**"},
+	})
+	got := strings.Join(spec.Args, "\x00")
+	if strings.Contains(got, "--include") || strings.Contains(got, "--exclude") {
+		t.Fatalf("args use unordered include/exclude flags: %#v", spec.Args)
+	}
+	want := []string{
+		"--filter", "- /steam-root/windrose/WindowsServer/R5/Saved/Logs/**",
+		"--filter", "+ /steam-root/windrose/WindowsServer/R5/Saved/**",
+		"--filter", "- **",
+	}
+	for _, part := range want {
+		if !containsArg(spec.Args, part) {
+			t.Fatalf("args missing %q: %#v", part, spec.Args)
+		}
 	}
 }
 

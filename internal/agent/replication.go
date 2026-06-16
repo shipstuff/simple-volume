@@ -198,11 +198,14 @@ func BuildRcloneFullSyncCommand(source SourceRef, sourceVolume, targetRoot strin
 	if source.Password != "" {
 		args = append(args, "--webdav-pass", source.Password)
 	}
-	for _, include := range filter.IncludePaths {
-		args = append(args, "--include", normalizeFilterPattern(include))
-	}
 	for _, exclude := range filter.ExcludePaths {
-		args = append(args, "--exclude", normalizeFilterPattern(exclude))
+		args = append(args, "--filter", "- "+normalizeFilterPattern(exclude))
+	}
+	for _, include := range filter.IncludePaths {
+		args = append(args, "--filter", "+ "+normalizeFilterPattern(include))
+	}
+	if len(filter.IncludePaths) > 0 {
+		args = append(args, "--filter", "- **")
 	}
 	args = append(args, ":webdav:"+strings.Trim(sourceVolume, "/"), targetRoot)
 	return CommandSpec{Name: "rclone", Args: args}
