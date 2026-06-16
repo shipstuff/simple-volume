@@ -36,6 +36,30 @@ func TestPathFilterIncludesAndExcludes(t *testing.T) {
 	}
 }
 
+func TestPathFilterTraversesParentsOfDeepIncludes(t *testing.T) {
+	filter := PathFilter{
+		IncludePaths: []string{
+			"steam-root/windrose/WindowsServer/R5/ServerDescription.json",
+			"steam-root/windrose/WindowsServer/R5/Saved/**",
+		},
+		ExcludePaths: []string{"steam-root/windrose/WindowsServer/R5/Saved/Logs/**"},
+	}
+	cases := map[string]bool{
+		"steam-root":                                      true,
+		"steam-root/windrose":                             true,
+		"steam-root/windrose/WindowsServer/R5":            true,
+		"steam-root/windrose/WindowsServer/R5/Saved":      true,
+		"steam-root/windrose/WindowsServer/R5/Saved/abc":  true,
+		"steam-root/windrose/WindowsServer/R5/Saved/Logs": false,
+		"steam-root/Steam":                                false,
+	}
+	for p, want := range cases {
+		if got := filter.ShouldTraverse(p); got != want {
+			t.Fatalf("ShouldTraverse(%q) = %t, want %t", p, got, want)
+		}
+	}
+}
+
 func TestCoalesceEventsKeepsLastEventPerPath(t *testing.T) {
 	events := CoalesceEvents([]FileEvent{
 		{Path: "save/a", Op: EventOpUpsert},

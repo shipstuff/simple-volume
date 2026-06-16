@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -16,6 +17,14 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/wrapperspb"
+)
+
+const (
+	volumeContextStoragePool  = "storagePool"
+	volumeContextPVCNamespace = "simple-volume.shipstuff.io/pvc-namespace"
+	volumeContextPVCName      = "simple-volume.shipstuff.io/pvc-name"
+	provisionerPVCNamespace   = "csi.storage.k8s.io/pvc/namespace"
+	provisionerPVCName        = "csi.storage.k8s.io/pvc/name"
 )
 
 type ServerConfig struct {
@@ -117,12 +126,19 @@ func (s *Server) CreateVolume(_ context.Context, req *csipb.CreateVolumeRequest)
 	if req.GetCapacityRange() != nil {
 		capacity = req.GetCapacityRange().GetRequiredBytes()
 	}
+	pvcNamespace := strings.TrimSpace(req.GetParameters()[provisionerPVCNamespace])
+	pvcName := strings.TrimSpace(req.GetParameters()[provisionerPVCName])
+	if pvcName == "" {
+		pvcName = req.GetName()
+	}
 	return &csipb.CreateVolumeResponse{
 		Volume: &csipb.Volume{
 			VolumeId:      req.GetName(),
 			CapacityBytes: capacity,
 			VolumeContext: map[string]string{
-				"storagePool": s.poolName,
+				volumeContextStoragePool:  s.poolName,
+				volumeContextPVCName:      pvcName,
+				volumeContextPVCNamespace: pvcNamespace,
 			},
 		},
 	}, nil
@@ -147,6 +163,7 @@ func (s *Server) NodeGetCapabilities(context.Context, *csipb.NodeGetCapabilities
 	return &csipb.NodeGetCapabilitiesResponse{
 		Capabilities: []*csipb.NodeServiceCapability{
 			nodeCapability(csipb.NodeServiceCapability_RPC_STAGE_UNSTAGE_VOLUME),
+			nodeCapability(csipb.NodeServiceCapability_RPC_VOLUME_MOUNT_GROUP),
 		},
 	}, nil
 }
@@ -166,9 +183,14 @@ func (s *Server) NodePublishVolume(_ context.Context, req *csipb.NodePublishVolu
 	if req.GetTargetPath() == "" {
 		return nil, status.Error(codes.InvalidArgument, "target path is required")
 	}
-	source, err := s.volumePath(req.GetVolumeId())
+	source, err := s.volumePath(req.GetVolumeId(), req.GetVolumeContext())
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
+	}
+	if mountGroup := req.GetVolumeCapability().GetMount().GetVolumeMountGroup(); mountGroup != "" {
+		if err := applyVolumeMountGroup(source, mountGroup); err != nil {
+			return nil, status.Error(codes.Internal, err.Error())
+		}
 	}
 	publisher := NodePublisher{
 		NodeName: s.nodeName,
@@ -200,11 +222,55 @@ func (s *Server) NodeUnpublishVolume(_ context.Context, req *csipb.NodeUnpublish
 	return &csipb.NodeUnpublishVolumeResponse{}, nil
 }
 
-func (s *Server) volumePath(volumeID string) (string, error) {
+func (s *Server) volumePath(volumeID string, volumeContext map[string]string) (string, error) {
+	namespace := strings.TrimSpace(volumeContext[volumeContextPVCNamespace])
+	if namespace == "" {
+		path, ok, err := s.existingNamespaceVolumePath(volumeID)
+		if err != nil {
+			return "", err
+		}
+		if ok {
+			return path, nil
+		}
+	}
 	return agent.EnsureVolumePath(agent.VolumePath{
-		Pool: agent.Pool{Name: s.poolName, Path: s.poolPath},
-		Name: volumeID,
+		Pool:      agent.Pool{Name: s.poolName, Path: s.poolPath},
+		Namespace: namespace,
+		Name:      volumeID,
 	}, 0o755)
+}
+
+func (s *Server) existingNamespaceVolumePath(volumeID string) (string, bool, error) {
+	pool := agent.Pool{Name: s.poolName, Path: s.poolPath}.Clean()
+	entries, err := os.ReadDir(pool.Path)
+	if os.IsNotExist(err) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	var match string
+	for _, entry := range entries {
+		if !entry.IsDir() || entry.Name() == "default" || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		candidate := filepath.Join(pool.Path, entry.Name(), volumeID)
+		info, err := os.Stat(candidate)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return "", false, err
+		}
+		if !info.IsDir() {
+			continue
+		}
+		if match != "" {
+			return "", false, fmt.Errorf("multiple namespace paths found for volume %s", volumeID)
+		}
+		match = candidate
+	}
+	return match, match != "", nil
 }
 
 func controllerCapability(capability csipb.ControllerServiceCapability_RPC_Type) *csipb.ControllerServiceCapability {
@@ -231,6 +297,33 @@ func bindMount(source, target string) error {
 		return err
 	}
 	return syscall.Mount(source, target, "", syscall.MS_BIND, "")
+}
+
+func applyVolumeMountGroup(path, group string) error {
+	gid, err := strconv.ParseInt(group, 10, 64)
+	if err != nil {
+		return fmt.Errorf("invalid volume mount group %q: %w", group, err)
+	}
+	return filepath.WalkDir(path, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		mode := info.Mode()
+		if mode&os.ModeSymlink != 0 {
+			return nil
+		}
+		if err := os.Chown(p, -1, int(gid)); err != nil {
+			return err
+		}
+		if mode.IsDir() {
+			return os.Chmod(p, mode.Perm()|0o770)
+		}
+		return os.Chmod(p, mode.Perm()|0o660)
+	})
 }
 
 func parseEndpoint(endpoint string) (string, string, error) {

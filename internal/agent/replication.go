@@ -106,6 +106,31 @@ func (f PathFilter) ShouldReplicate(p string) bool {
 	return false
 }
 
+func (f PathFilter) ShouldTraverse(p string) bool {
+	clean, err := NormalizeEventPath(p)
+	if err != nil {
+		return false
+	}
+	for _, exclude := range f.ExcludePaths {
+		if matchesPath(exclude, clean) {
+			return false
+		}
+	}
+	if len(f.IncludePaths) == 0 {
+		return true
+	}
+	for _, include := range f.IncludePaths {
+		if matchesPath(include, clean) {
+			return true
+		}
+		root := filterStaticPrefix(include)
+		if root != "" && isPathAncestor(clean, root) {
+			return true
+		}
+	}
+	return false
+}
+
 func CoalesceEvents(events []FileEvent, filter PathFilter) []FileEvent {
 	byPath := make(map[string]FileEvent)
 	for _, event := range events {
@@ -331,6 +356,33 @@ func matchesPath(pattern, p string) bool {
 		return true
 	}
 	return p == pattern || strings.HasPrefix(p, pattern+"/")
+}
+
+func filterStaticPrefix(pattern string) string {
+	pattern = strings.Trim(strings.ReplaceAll(pattern, "\\", "/"), "/")
+	if pattern == "" {
+		return ""
+	}
+	cut := len(pattern)
+	for _, marker := range []string{"*", "?", "["} {
+		if idx := strings.Index(pattern, marker); idx >= 0 && idx < cut {
+			cut = idx
+		}
+	}
+	prefix := strings.TrimSuffix(pattern[:cut], "/")
+	if slash := strings.LastIndex(prefix, "/"); slash >= 0 && cut < len(pattern) {
+		prefix = prefix[:slash]
+	}
+	return strings.Trim(prefix, "/")
+}
+
+func isPathAncestor(candidate, descendant string) bool {
+	candidate = strings.Trim(candidate, "/")
+	descendant = strings.Trim(descendant, "/")
+	if candidate == "" {
+		return true
+	}
+	return candidate == descendant || strings.HasPrefix(descendant, candidate+"/")
 }
 
 func normalizeFilterPattern(pattern string) string {

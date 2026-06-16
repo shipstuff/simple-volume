@@ -75,13 +75,16 @@ func WatchVolume(ctx context.Context, cfg WatchConfig, sink BatchSink) error {
 			}
 		case event := <-watcher.Events:
 			rel, ok := relativeWatchPath(root, event.Name)
-			if !ok || !filter.ShouldReplicate(rel) {
+			if !ok {
 				continue
 			}
 			if event.Has(fsnotify.Create) {
-				if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
+				if info, err := os.Stat(event.Name); err == nil && info.IsDir() && filter.ShouldTraverse(rel) {
 					_ = addRecursiveWatches(watcher, event.Name, filter)
 				}
+			}
+			if !filter.ShouldReplicate(rel) {
+				continue
 			}
 			op := EventOpUpsert
 			if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
@@ -105,7 +108,7 @@ func addRecursiveWatches(watcher *fsnotify.Watcher, root string, filter PathFilt
 		if !d.IsDir() {
 			return nil
 		}
-		if rel, ok := relativeWatchPath(root, p); ok && rel != "." && !filter.ShouldReplicate(rel) {
+		if rel, ok := relativeWatchPath(root, p); ok && rel != "." && !filter.ShouldTraverse(rel) {
 			return filepath.SkipDir
 		}
 		return watcher.Add(p)
