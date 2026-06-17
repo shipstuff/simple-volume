@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -105,13 +106,13 @@ func TestReconcileOneStartsWatchAndRunsStartupFullSyncOnce(t *testing.T) {
 	}))
 	defer source.Close()
 
-	var fullSyncs int
+	var fullSyncs atomic.Int32
 	target := func() *httptest.Server {
 		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path != "/replication/full-sync" {
 				t.Fatalf("target path = %s", r.URL.Path)
 			}
-			fullSyncs++
+			fullSyncs.Add(1)
 			_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 		}))
 	}
@@ -139,14 +140,15 @@ func TestReconcileOneStartsWatchAndRunsStartupFullSyncOnce(t *testing.T) {
 	if err := controller.reconcileOne(context.Background(), desired, "secret", time.Date(2026, 6, 15, 3, 0, 0, 0, time.UTC)); err != nil {
 		t.Fatalf("reconcileOne returned error: %v", err)
 	}
+	waitFor(t, time.Second, func() bool { return fullSyncs.Load() == 2 })
 	if err := controller.reconcileOne(context.Background(), desired, "secret", time.Date(2026, 6, 15, 3, 1, 0, 0, time.UTC)); err != nil {
 		t.Fatalf("second reconcileOne returned error: %v", err)
 	}
 	if watchStarts != 1 {
 		t.Fatalf("watchStarts = %d, want 1", watchStarts)
 	}
-	if fullSyncs != 2 {
-		t.Fatalf("fullSyncs = %d, want 2", fullSyncs)
+	if got := fullSyncs.Load(); got != 2 {
+		t.Fatalf("fullSyncs = %d, want 2", got)
 	}
 }
 
@@ -210,6 +212,20 @@ func TestShouldRunScheduledFullSync(t *testing.T) {
 	}
 	if shouldRunScheduledFullSync("*/5 * * * *", time.Date(2026, 6, 15, 4, 0, 0, 0, time.UTC)) {
 		t.Fatal("unsupported schedule should not match")
+	}
+}
+
+func waitFor(t *testing.T, timeout time.Duration, ok func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if ok() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !ok() {
+		t.Fatalf("condition not met within %v", timeout)
 	}
 }
 

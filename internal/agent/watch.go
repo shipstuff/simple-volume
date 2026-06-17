@@ -10,6 +10,8 @@ import (
 	"github.com/fsnotify/fsnotify"
 )
 
+const maxPendingWatchEvents = 512
+
 type WatchConfig struct {
 	Pool         Pool
 	Namespace    string
@@ -83,12 +85,18 @@ func WatchVolume(ctx context.Context, cfg WatchConfig, sink BatchSink) error {
 					if err := addRecursiveWatches(watcher, event.Name, filter); err != nil {
 						return err
 					}
-					created, err := collectExistingEvents(root, event.Name, filter)
-					if err != nil {
+					collected := false
+					if err := collectExistingEvents(root, event.Name, filter, func(event FileEvent) error {
+						collected = true
+						pending = append(pending, event)
+						if len(pending) >= maxPendingWatchEvents {
+							return flush()
+						}
+						return nil
+					}); err != nil {
 						return err
 					}
-					pending = append(pending, created...)
-					if len(created) > 0 {
+					if collected && len(pending) > 0 {
 						timer.Reset(debounce)
 					}
 					continue
@@ -102,6 +110,12 @@ func WatchVolume(ctx context.Context, cfg WatchConfig, sink BatchSink) error {
 				op = EventOpDelete
 			}
 			pending = append(pending, FileEvent{Path: rel, Op: op})
+			if len(pending) >= maxPendingWatchEvents {
+				if err := flush(); err != nil {
+					return err
+				}
+				continue
+			}
 			timer.Reset(debounce)
 		case <-timer.C:
 			if err := flush(); err != nil {
@@ -126,9 +140,8 @@ func addRecursiveWatches(watcher *fsnotify.Watcher, root string, filter PathFilt
 	})
 }
 
-func collectExistingEvents(root, start string, filter PathFilter) ([]FileEvent, error) {
-	events := make([]FileEvent, 0)
-	err := filepath.WalkDir(start, func(p string, d os.DirEntry, err error) error {
+func collectExistingEvents(root, start string, filter PathFilter, yield func(FileEvent) error) error {
+	return filepath.WalkDir(start, func(p string, d os.DirEntry, err error) error {
 		if err != nil {
 			if os.IsNotExist(err) {
 				return nil
@@ -146,11 +159,10 @@ func collectExistingEvents(root, start string, filter PathFilter) ([]FileEvent, 
 			return nil
 		}
 		if filter.ShouldReplicate(rel) {
-			events = append(events, FileEvent{Path: rel, Op: EventOpUpsert})
+			return yield(FileEvent{Path: rel, Op: EventOpUpsert})
 		}
 		return nil
 	})
-	return events, err
 }
 
 func relativeWatchPath(root, p string) (string, bool) {
