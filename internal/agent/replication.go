@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -86,6 +87,31 @@ func (ExecRunner) RunOutput(ctx context.Context, spec CommandSpec) ([]byte, erro
 	cmd.Stderr = output
 	err := cmd.Run()
 	return output.Bytes(), err
+}
+
+type VolumeLocker struct {
+	mu    sync.Mutex
+	locks map[string]*sync.Mutex
+}
+
+func NewVolumeLocker() *VolumeLocker {
+	return &VolumeLocker{locks: make(map[string]*sync.Mutex)}
+}
+
+func (l *VolumeLocker) Lock(namespace, volume string) func() {
+	if l == nil {
+		return func() {}
+	}
+	key := safeSegment(namespace) + "/" + safeSegment(volume)
+	l.mu.Lock()
+	lock := l.locks[key]
+	if lock == nil {
+		lock = &sync.Mutex{}
+		l.locks[key] = lock
+	}
+	l.mu.Unlock()
+	lock.Lock()
+	return lock.Unlock
 }
 
 type CommandError struct {
@@ -464,12 +490,16 @@ func runFullSyncCommand(ctx context.Context, runner Runner, spec CommandSpec) er
 	return CommandError{Err: err, Output: output}
 }
 
-func SyncBatchHandler(pool Pool, auth TokenAuthorizer, runner Runner, timeout time.Duration) http.HandlerFunc {
+func SyncBatchHandler(pool Pool, auth TokenAuthorizer, runner Runner, timeout time.Duration, lockers ...*VolumeLocker) http.HandlerFunc {
 	if runner == nil {
 		runner = ExecRunner{}
 	}
 	if timeout <= 0 {
 		timeout = 10 * time.Minute
+	}
+	var locker *VolumeLocker
+	if len(lockers) > 0 {
+		locker = lockers[0]
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -487,6 +517,8 @@ func SyncBatchHandler(pool Pool, auth TokenAuthorizer, runner Runner, timeout ti
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), timeout)
 		defer cancel()
+		unlock := locker.Lock(batch.Namespace, batch.Volume)
+		defer unlock()
 		if err := ApplyEventBatch(ctx, runner, pool, batch); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -499,12 +531,16 @@ func SyncBatchHandler(pool Pool, auth TokenAuthorizer, runner Runner, timeout ti
 	}
 }
 
-func FullSyncHandler(pool Pool, auth TokenAuthorizer, runner Runner, timeout time.Duration) http.HandlerFunc {
+func FullSyncHandler(pool Pool, auth TokenAuthorizer, runner Runner, timeout time.Duration, lockers ...*VolumeLocker) http.HandlerFunc {
 	if runner == nil {
 		runner = ExecRunner{}
 	}
 	if timeout <= 0 {
 		timeout = time.Hour
+	}
+	var locker *VolumeLocker
+	if len(lockers) > 0 {
+		locker = lockers[0]
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -522,6 +558,8 @@ func FullSyncHandler(pool Pool, auth TokenAuthorizer, runner Runner, timeout tim
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), timeout)
 		defer cancel()
+		unlock := locker.Lock(req.Namespace, req.Volume)
+		defer unlock()
 		if err := ApplyFullSync(ctx, runner, pool, req); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

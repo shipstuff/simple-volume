@@ -128,11 +128,11 @@ func TestDesiredReplicationsFallsBackToPVCActiveNode(t *testing.T) {
 }
 
 func TestReconcileOneStartsWatchAndRunsStartupFullSyncOnce(t *testing.T) {
-	var watchStarts int
+	var watchStarts atomic.Int32
 	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/replication/watch/start":
-			watchStarts++
+			watchStarts.Add(1)
 			var req agent.WatchStartRequest
 			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 				t.Fatalf("decode watch request: %v", err)
@@ -183,12 +183,16 @@ func TestReconcileOneStartsWatchAndRunsStartupFullSyncOnce(t *testing.T) {
 	if err := controller.reconcileOne(context.Background(), desired, "secret", time.Date(2026, 6, 15, 3, 0, 0, 0, time.UTC)); err != nil {
 		t.Fatalf("reconcileOne returned error: %v", err)
 	}
+	if got := watchStarts.Load(); got != 0 {
+		t.Fatalf("watchStarts after initial reconcile = %d, want 0 before full sync completes", got)
+	}
 	waitFor(t, time.Second, func() bool { return fullSyncs.Load() == 2 })
+	waitFor(t, time.Second, func() bool { return watchStarts.Load() == 1 })
 	if err := controller.reconcileOne(context.Background(), desired, "secret", time.Date(2026, 6, 15, 3, 1, 0, 0, time.UTC)); err != nil {
 		t.Fatalf("second reconcileOne returned error: %v", err)
 	}
-	if watchStarts != 1 {
-		t.Fatalf("watchStarts = %d, want 1", watchStarts)
+	if got := watchStarts.Load(); got != 1 {
+		t.Fatalf("watchStarts = %d, want 1", got)
 	}
 	if got := fullSyncs.Load(); got != 2 {
 		t.Fatalf("fullSyncs = %d, want 2", got)

@@ -118,7 +118,7 @@ type managedWatch struct {
 
 func NewWatchManager(pool Pool, sender BatchSender) *WatchManager {
 	if sender == nil {
-		sender = HTTPBatchSender{Client: &http.Client{Timeout: 30 * time.Second}}
+		sender = HTTPBatchSender{Client: &http.Client{Timeout: 10 * time.Minute}}
 	}
 	return &WatchManager{
 		pool:    pool,

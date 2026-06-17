@@ -89,6 +89,7 @@ func runAgent(args []string) {
 
 	auth := agent.TokenAuthorizer{Token: *token}
 	pool := agent.Pool{Name: *poolName, Path: *poolPath}
+	replicationLocks := agent.NewVolumeLocker()
 	watchManager := agent.NewWatchManager(pool, nil)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok\n")) })
@@ -128,8 +129,8 @@ func runAgent(args []string) {
 		}
 		_ = json.NewEncoder(w).Encode(map[string]string{"path": path})
 	})
-	mux.HandleFunc("/replication/sync-batch", agent.SyncBatchHandler(pool, auth, agent.ExecRunner{}, 10*time.Minute))
-	mux.HandleFunc("/replication/full-sync", agent.FullSyncHandler(pool, auth, agent.ExecRunner{}, time.Hour))
+	mux.HandleFunc("/replication/sync-batch", agent.SyncBatchHandler(pool, auth, agent.ExecRunner{}, 10*time.Minute, replicationLocks))
+	mux.HandleFunc("/replication/full-sync", agent.FullSyncHandler(pool, auth, agent.ExecRunner{}, time.Hour, replicationLocks))
 	mux.HandleFunc("/replication/watch/start", watchManager.StartHandler(auth))
 	mux.HandleFunc("/replication/watch/stop", watchManager.StopHandler(auth))
 	mux.HandleFunc("/replication/watch/status", watchManager.StatusHandler(auth))

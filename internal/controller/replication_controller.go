@@ -242,6 +242,55 @@ func (c *ReplicationController) DesiredReplications(ctx context.Context, token s
 func (c *ReplicationController) reconcileOne(ctx context.Context, desired DesiredReplication, token string, now time.Time) error {
 	key := desired.Namespace + "/" + desired.Volume
 	signature := desired.signature()
+	if desired.FullSync {
+		syncKey := key + ":" + signature
+		c.mu.Lock()
+		done := c.completedSyncs[syncKey]
+		c.mu.Unlock()
+		if !done {
+			if c.tryStartFullSync(syncKey) {
+				go c.runFullSync(ctx, syncKey, desired, token, now, func() {
+					c.mu.Lock()
+					c.completedSyncs[syncKey] = true
+					c.mu.Unlock()
+					log.Printf("completed startup full sync namespace=%s claim=%s volume=%s targets=%d",
+						desired.Namespace, desired.ClaimName, desired.Volume, len(desired.Targets))
+					if err := c.ensureWatchStarted(ctx, desired, token, signature); err != nil {
+						log.Printf("start replication watch after full sync namespace=%s claim=%s volume=%s: %v",
+							desired.Namespace, desired.ClaimName, desired.Volume, err)
+					}
+				})
+			}
+			return nil
+		}
+	}
+
+	if err := c.ensureWatchStarted(ctx, desired, token, signature); err != nil {
+		return err
+	}
+
+	if shouldRunScheduledFullSync(desired.FullSchedule, now) {
+		scheduleKey := key + ":" + desired.FullSchedule
+		today := now.Format("2006-01-02")
+		c.mu.Lock()
+		last := c.lastScheduledOn[scheduleKey]
+		c.mu.Unlock()
+		syncKey := scheduleKey + ":" + today
+		if last != today && c.tryStartFullSync(syncKey) {
+			go c.runFullSync(ctx, syncKey, desired, token, now, func() {
+				c.mu.Lock()
+				c.lastScheduledOn[scheduleKey] = today
+				c.mu.Unlock()
+				log.Printf("completed scheduled full sync namespace=%s claim=%s volume=%s schedule=%q targets=%d",
+					desired.Namespace, desired.ClaimName, desired.Volume, desired.FullSchedule, len(desired.Targets))
+			})
+		}
+	}
+	return nil
+}
+
+func (c *ReplicationController) ensureWatchStarted(ctx context.Context, desired DesiredReplication, token, signature string) error {
+	key := desired.Namespace + "/" + desired.Volume
 	c.mu.Lock()
 	alreadyStarted := c.startedWatches[key] == signature
 	c.mu.Unlock()
@@ -265,40 +314,6 @@ func (c *ReplicationController) reconcileOne(ctx context.Context, desired Desire
 		c.mu.Unlock()
 		log.Printf("started replication watch namespace=%s claim=%s volume=%s activeNode=%s targets=%d",
 			desired.Namespace, desired.ClaimName, desired.Volume, desired.ActiveNode, len(desired.Targets))
-	}
-
-	if desired.FullSync {
-		syncKey := key + ":" + signature
-		c.mu.Lock()
-		done := c.completedSyncs[syncKey]
-		c.mu.Unlock()
-		if !done && c.tryStartFullSync(syncKey) {
-			go c.runFullSync(ctx, syncKey, desired, token, now, func() {
-				c.mu.Lock()
-				c.completedSyncs[syncKey] = true
-				c.mu.Unlock()
-				log.Printf("completed startup full sync namespace=%s claim=%s volume=%s targets=%d",
-					desired.Namespace, desired.ClaimName, desired.Volume, len(desired.Targets))
-			})
-		}
-	}
-
-	if shouldRunScheduledFullSync(desired.FullSchedule, now) {
-		scheduleKey := key + ":" + desired.FullSchedule
-		today := now.Format("2006-01-02")
-		c.mu.Lock()
-		last := c.lastScheduledOn[scheduleKey]
-		c.mu.Unlock()
-		syncKey := scheduleKey + ":" + today
-		if last != today && c.tryStartFullSync(syncKey) {
-			go c.runFullSync(ctx, syncKey, desired, token, now, func() {
-				c.mu.Lock()
-				c.lastScheduledOn[scheduleKey] = today
-				c.mu.Unlock()
-				log.Printf("completed scheduled full sync namespace=%s claim=%s volume=%s schedule=%q targets=%d",
-					desired.Namespace, desired.ClaimName, desired.Volume, desired.FullSchedule, len(desired.Targets))
-			})
-		}
 	}
 	return nil
 }
