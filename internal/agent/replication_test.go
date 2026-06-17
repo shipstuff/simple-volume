@@ -94,6 +94,30 @@ func TestCoalesceEventsKeepsLastEventPerPath(t *testing.T) {
 	}
 }
 
+func TestCoalesceEventsPreservesFinalOccurrenceOrder(t *testing.T) {
+	events := CoalesceEvents([]FileEvent{
+		{Path: "db/MANIFEST-0001", Op: EventOpUpsert},
+		{Path: "db/000123.sst", Op: EventOpUpsert},
+		{Path: "db/CURRENT", Op: EventOpUpsert},
+		{Path: "db/000123.sst", Op: EventOpDelete},
+		{Path: "db/000124.sst", Op: EventOpUpsert},
+	}, PathFilter{IncludePaths: []string{"db/**"}})
+	want := []FileEvent{
+		{Path: "db/MANIFEST-0001", Op: EventOpUpsert},
+		{Path: "db/CURRENT", Op: EventOpUpsert},
+		{Path: "db/000123.sst", Op: EventOpDelete},
+		{Path: "db/000124.sst", Op: EventOpUpsert},
+	}
+	if len(events) != len(want) {
+		t.Fatalf("events = %#v, want %#v", events, want)
+	}
+	for i := range want {
+		if events[i] != want[i] {
+			t.Fatalf("events[%d] = %#v, want %#v; all=%#v", i, events[i], want[i], events)
+		}
+	}
+}
+
 func TestBuildRcloneCopyToCommand(t *testing.T) {
 	spec, err := BuildRcloneCopyToCommand(SourceRef{WebDAVURL: "http://source:8081"}, "default/demo/save/a.txt", filepath.Join("/target", "save", "a.txt"))
 	if err != nil {

@@ -12,7 +12,6 @@ import (
 	"os/exec"
 	"path"
 	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -233,6 +232,8 @@ func (f PathFilter) ShouldTraverse(p string) bool {
 
 func CoalesceEvents(events []FileEvent, filter PathFilter) []FileEvent {
 	byPath := make(map[string]FileEvent)
+	order := make([]string, 0, len(events))
+	position := make(map[string]int)
 	for _, event := range events {
 		clean, err := NormalizeEventPath(event.Path)
 		if err != nil || !filter.ShouldReplicate(clean) {
@@ -242,15 +243,18 @@ func CoalesceEvents(events []FileEvent, filter PathFilter) []FileEvent {
 		if op == "" {
 			op = EventOpUpsert
 		}
+		if idx, ok := position[clean]; ok {
+			order = append(order[:idx], order[idx+1:]...)
+			for i := idx; i < len(order); i++ {
+				position[order[i]] = i
+			}
+		}
+		position[clean] = len(order)
+		order = append(order, clean)
 		byPath[clean] = FileEvent{Path: clean, Op: op}
 	}
-	paths := make([]string, 0, len(byPath))
-	for p := range byPath {
-		paths = append(paths, p)
-	}
-	sort.Strings(paths)
-	out := make([]FileEvent, 0, len(paths))
-	for _, p := range paths {
+	out := make([]FileEvent, 0, len(order))
+	for _, p := range order {
 		out = append(out, byPath[p])
 	}
 	return out
