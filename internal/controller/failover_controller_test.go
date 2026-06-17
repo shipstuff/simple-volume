@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -24,19 +23,16 @@ func TestFailoverControllerPromotesStorageBindingAndDeletesStalePod(t *testing.T
 				Name:      "data",
 				Namespace: "default",
 				Annotations: map[string]string{
-					AnnotationReplicationEnabled:        "true",
-					AnnotationFailoverEnabled:           "true",
-					AnnotationFailoverWorkloadKind:      "Deployment",
-					AnnotationFailoverWorkloadName:      "writer",
-					AnnotationFailoverGracePeriod:       "1s",
-					AnnotationFailoverMaxStaleness:      "30s",
-					AnnotationIncludePaths:              "writes.log",
-					AnnotationFullSyncOnStart:           "true",
-					AnnotationFullSyncSchedule:          "0 4 * * *",
-					AnnotationDebounce:                  "2s",
-					AnnotationExcludePaths:              "downloads/**",
-					AnnotationFailoverWorkloadNamespace: "default",
-					AnnotationSelectedNode:              "kapolei-pacific-1",
+					AnnotationReplicationEnabled:   "true",
+					AnnotationFailoverEnabled:      "true",
+					AnnotationFailoverGracePeriod:  "1s",
+					AnnotationFailoverMaxStaleness: "30s",
+					AnnotationIncludePaths:         "writes.log",
+					AnnotationFullSyncOnStart:      "true",
+					AnnotationFullSyncSchedule:     "0 4 * * *",
+					AnnotationDebounce:             "2s",
+					AnnotationExcludePaths:         "downloads/**",
+					AnnotationSelectedNode:         "kapolei-pacific-1",
 				},
 			},
 			Spec: corev1.PersistentVolumeClaimSpec{
@@ -44,7 +40,6 @@ func TestFailoverControllerPromotesStorageBindingAndDeletesStalePod(t *testing.T
 				VolumeName:       "pvc-123",
 			},
 		},
-		deployment("writer", "default", "kapolei-pacific-1"),
 		workloadPod("writer-old", "default", "kapolei-pacific-1", "data"),
 		readyNode("sf-west-1", true),
 		readyNode("fresno-west-1", true),
@@ -65,16 +60,6 @@ func TestFailoverControllerPromotesStorageBindingAndDeletesStalePod(t *testing.T
 	}
 	if err := controller.Reconcile(context.Background(), now.Add(2*time.Second)); err != nil {
 		t.Fatalf("second Reconcile returned error: %v", err)
-	}
-	updated, err := client.AppsV1().Deployments("default").Get(context.Background(), "writer", metav1.GetOptions{})
-	if err != nil {
-		t.Fatalf("get deployment: %v", err)
-	}
-	if got := updated.Spec.Template.Spec.NodeSelector[RoleLabel("default", "data")]; got != "active" {
-		t.Fatalf("nodeSelector = %#v, want active volume label", updated.Spec.Template.Spec.NodeSelector)
-	}
-	if _, ok := updated.Spec.Template.Spec.NodeSelector[corev1.LabelHostname]; ok {
-		t.Fatalf("nodeSelector still has hard hostname pin: %#v", updated.Spec.Template.Spec.NodeSelector)
 	}
 	pv, err := client.CoreV1().PersistentVolumes().Get(context.Background(), "pvc-123", metav1.GetOptions{})
 	if err != nil {
@@ -129,7 +114,6 @@ func TestFailoverControllerBlocksStaleReplicas(t *testing.T) {
 				Annotations: map[string]string{
 					AnnotationReplicationEnabled:   "true",
 					AnnotationFailoverEnabled:      "true",
-					AnnotationFailoverWorkloadName: "writer",
 					AnnotationFailoverGracePeriod:  "1s",
 					AnnotationFailoverMaxStaleness: "30s",
 				},
@@ -139,7 +123,6 @@ func TestFailoverControllerBlocksStaleReplicas(t *testing.T) {
 				VolumeName:       "pvc-123",
 			},
 		},
-		deployment("writer", "default", "kapolei-pacific-1"),
 		workloadPod("writer-old", "default", "kapolei-pacific-1", "data"),
 		readyNode("sf-west-1", true),
 		readyNode("kapolei-pacific-1", false),
@@ -158,12 +141,15 @@ func TestFailoverControllerBlocksStaleReplicas(t *testing.T) {
 	if err := controller.Reconcile(context.Background(), now.Add(2*time.Second)); err != nil {
 		t.Fatalf("second Reconcile returned error: %v", err)
 	}
-	updated, err := client.AppsV1().Deployments("default").Get(context.Background(), "writer", metav1.GetOptions{})
+	pvc, err := client.CoreV1().PersistentVolumeClaims("default").Get(context.Background(), "data", metav1.GetOptions{})
 	if err != nil {
-		t.Fatalf("get deployment: %v", err)
+		t.Fatalf("get pvc: %v", err)
 	}
-	if got := updated.Spec.Template.Spec.NodeSelector["kubernetes.io/hostname"]; got != "kapolei-pacific-1" {
-		t.Fatalf("nodeSelector = %q, want original node", got)
+	if got := pvc.Annotations[AnnotationActiveNode]; got != "" {
+		t.Fatalf("pvc active node annotation = %q, want no promotion", got)
+	}
+	if _, err := client.CoreV1().Pods("default").Get(context.Background(), "writer-old", metav1.GetOptions{}); err != nil {
+		t.Fatalf("stale pod should remain when replicas are stale: %v", err)
 	}
 }
 
@@ -178,7 +164,6 @@ func TestFailoverControllerHonorsNodePriorityOverFreshness(t *testing.T) {
 				Annotations: map[string]string{
 					AnnotationReplicationEnabled:   "true",
 					AnnotationFailoverEnabled:      "true",
-					AnnotationFailoverWorkloadName: "writer",
 					AnnotationFailoverGracePeriod:  "1s",
 					AnnotationFailoverMaxStaleness: "30s",
 					AnnotationFailoverNodePriority: "sf-west-1,fresno-west-1",
@@ -189,7 +174,6 @@ func TestFailoverControllerHonorsNodePriorityOverFreshness(t *testing.T) {
 				VolumeName:       "pvc-123",
 			},
 		},
-		deployment("writer", "default", "kapolei-pacific-1"),
 		workloadPod("writer-old", "default", "kapolei-pacific-1", "data"),
 		readyNode("sf-west-1", true),
 		readyNode("fresno-west-1", true),
@@ -231,7 +215,6 @@ func TestFailoverControllerSkipsPriorityNodeWithoutResourceFit(t *testing.T) {
 				Annotations: map[string]string{
 					AnnotationReplicationEnabled:   "true",
 					AnnotationFailoverEnabled:      "true",
-					AnnotationFailoverWorkloadName: "writer",
 					AnnotationFailoverGracePeriod:  "1s",
 					AnnotationFailoverMaxStaleness: "30s",
 					AnnotationFailoverNodePriority: "sf-west-1,fresno-west-1",
@@ -242,7 +225,6 @@ func TestFailoverControllerSkipsPriorityNodeWithoutResourceFit(t *testing.T) {
 				VolumeName:       "pvc-123",
 			},
 		},
-		deployment("writer", "default", "kapolei-pacific-1"),
 		workloadPodWithRequests("writer-old", "default", "kapolei-pacific-1", "data", "750m", "2Gi"),
 		readyNodeWithAllocatable("sf-west-1", true, "1000m", "1Gi"),
 		readyNodeWithAllocatable("fresno-west-1", true, "4000m", "8Gi"),
@@ -284,7 +266,6 @@ func TestFailoverControllerMaintainsFreshCandidateLabels(t *testing.T) {
 				Annotations: map[string]string{
 					AnnotationReplicationEnabled:   "true",
 					AnnotationFailoverEnabled:      "true",
-					AnnotationFailoverWorkloadName: "writer",
 					AnnotationFailoverMaxStaleness: "30s",
 				},
 			},
@@ -347,7 +328,6 @@ func TestFailoverControllerExcludesDemotedNodeFromCandidates(t *testing.T) {
 				Annotations: map[string]string{
 					AnnotationReplicationEnabled:   "true",
 					AnnotationFailoverEnabled:      "true",
-					AnnotationFailoverWorkloadName: "writer",
 					AnnotationFailoverGracePeriod:  "1s",
 					AnnotationFailoverMaxStaleness: "30s",
 					AnnotationFailoverNodePriority: "kapolei-pacific-1,fresno-west-1",
@@ -358,7 +338,6 @@ func TestFailoverControllerExcludesDemotedNodeFromCandidates(t *testing.T) {
 				VolumeName:       "pvc-123",
 			},
 		},
-		deployment("writer", "default", "kapolei-pacific-1"),
 		workloadPod("writer-old", "default", "kapolei-pacific-1", "data"),
 		readyNode("sf-west-1", true),
 		readyNode("fresno-west-1", true),
@@ -418,19 +397,6 @@ func TestReadyNodeSetExcludesUnschedulableNodes(t *testing.T) {
 	}
 	if !nodes["sf-west-1"] {
 		t.Fatal("schedulable ready node should be included")
-	}
-}
-
-func deployment(name, namespace, node string) *appsv1.Deployment {
-	return &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
-		Spec: appsv1.DeploymentSpec{
-			Template: corev1.PodTemplateSpec{
-				Spec: corev1.PodSpec{
-					NodeSelector: map[string]string{"kubernetes.io/hostname": node},
-				},
-			},
-		},
 	}
 }
 

@@ -124,15 +124,12 @@ The current schedule parser intentionally supports exact minute/hour cron
 windows such as `0 4 * * *`; ranges and step expressions are left for the
 controller-runtime implementation.
 
-Opt-in V0 failover is also PVC annotation driven and currently supports
-Deployment workloads:
+Opt-in V0 failover is PVC annotation driven:
 
 ```yaml
 metadata:
   annotations:
     simple-volume.shipstuff.io/failover-enabled: "true"
-    simple-volume.shipstuff.io/failover-workload-kind: "Deployment"
-    simple-volume.shipstuff.io/failover-workload-name: "my-writer"
     simple-volume.shipstuff.io/failover-grace-period: "1m"
     simple-volume.shipstuff.io/failover-max-staleness: "2m"
     simple-volume.shipstuff.io/failover-node-priority: "fresno-west-1,sf-west-1,kapolei-pacific-1"
@@ -148,10 +145,20 @@ the freshest eligible replica. Promotion records
 `simple-volume.shipstuff.io/active-node` on the PV/PVC, removes the stale
 Kubernetes `volume.kubernetes.io/selected-node` PVC annotation, moves the
 volume's active node label to the promoted node, and deletes stale pods using
-the claim. Demo Deployment support removes an old hard
-`kubernetes.io/hostname` node selector and replaces it with a stable selector
-for the volume's active-node label, so future failovers move by relabeling
-nodes rather than repatching a concrete hostname.
+the claim.
+
+Workload charts own their own scheduling intent. A pod template that consumes a
+simple-volume claim should select the stable per-volume active label:
+
+```yaml
+nodeSelector:
+  simple-volume.shipstuff.io/default.mydata-role: active
+```
+
+That keeps failover generic across Deployments, StatefulSets, and other pod
+owners. `simple-volume` moves node labels and deletes stale pods; Kubernetes
+and the workload's owner controller create the replacement pod on the currently
+labeled active node.
 
 The old active node is not promoted back automatically when it returns. If the
 old active rejoins as a replica target, the next full sync asks that agent to
@@ -170,21 +177,6 @@ Candidate labels are derived state. They are removed from offline, stale, or
 resource-ineligible nodes and should not be treated as the source of truth. The
 PV/PVC active-node annotations remain the operator-facing status boundary, and
 CSI still validates that a node is authorized before mounting.
-
-## Future Scheduling Work
-
-The next scheduling pass should let Kubernetes choose among fresh candidates
-without trying to reimplement the scheduler:
-
-- keep storage pool membership operator-defined through the node-agent
-  DaemonSet placement
-- require consuming workloads to carry the appropriate storage-pool or
-  per-volume scheduling selectors/affinity in their own manifests
-- if Kubernetes still leaves the replacement pod Pending, retry the next
-  eligible replica rather than treating CSI mount failure as the promotion
-  trigger
-- avoid mutating admission webhooks for v1; explicit workload scheduling is
-  easier to reason about and keeps adoption visible in the app chart
 
 ## Development
 

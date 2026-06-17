@@ -10,7 +10,6 @@ import (
 	"sync"
 	"time"
 
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -18,16 +17,13 @@ import (
 )
 
 const (
-	AnnotationFailoverEnabled           = LabelPrefix + "/failover-enabled"
-	AnnotationFailoverWorkloadKind      = LabelPrefix + "/failover-workload-kind"
-	AnnotationFailoverWorkloadName      = LabelPrefix + "/failover-workload-name"
-	AnnotationFailoverWorkloadNamespace = LabelPrefix + "/failover-workload-namespace"
-	AnnotationFailoverGracePeriod       = LabelPrefix + "/failover-grace-period"
-	AnnotationFailoverMaxStaleness      = LabelPrefix + "/failover-max-staleness"
-	AnnotationFailoverNodePriority      = LabelPrefix + "/failover-node-priority"
-	AnnotationActiveNode                = LabelPrefix + "/active-node"
-	AnnotationPreviousActiveNode        = LabelPrefix + "/previous-active-node"
-	AnnotationSelectedNode              = "volume.kubernetes.io/selected-node"
+	AnnotationFailoverEnabled      = LabelPrefix + "/failover-enabled"
+	AnnotationFailoverGracePeriod  = LabelPrefix + "/failover-grace-period"
+	AnnotationFailoverMaxStaleness = LabelPrefix + "/failover-max-staleness"
+	AnnotationFailoverNodePriority = LabelPrefix + "/failover-node-priority"
+	AnnotationActiveNode           = LabelPrefix + "/active-node"
+	AnnotationPreviousActiveNode   = LabelPrefix + "/previous-active-node"
+	AnnotationSelectedNode         = "volume.kubernetes.io/selected-node"
 )
 
 type FailoverController struct {
@@ -158,13 +154,13 @@ func (c *FailoverController) reconcilePVC(ctx context.Context, pvc *corev1.Persi
 		return fmt.Errorf("failover blocked: %s", decision.Reason)
 	}
 	previousActive := activeNodeFromPods(usingClaim, decision.TargetNode)
+	if previousActive == "" && activeNode != "" && activeNode != decision.TargetNode {
+		previousActive = activeNode
+	}
 	if err := c.promoteStorageState(ctx, pvc, decision.TargetNode, previousActive); err != nil {
 		return err
 	}
 	if err := c.promoteNodeLabel(ctx, pvc, decision.TargetNode); err != nil {
-		return err
-	}
-	if err := c.patchDeploymentForStorageScheduling(ctx, pvc); err != nil {
 		return err
 	}
 	for _, pod := range usingClaim {
@@ -318,44 +314,6 @@ func (c *FailoverController) reconcileNodeLabels(ctx context.Context, pvc *corev
 	return nil
 }
 
-func (c *FailoverController) patchDeploymentForStorageScheduling(ctx context.Context, pvc *corev1.PersistentVolumeClaim) error {
-	kind := strings.TrimSpace(pvc.Annotations[AnnotationFailoverWorkloadKind])
-	if kind == "" {
-		kind = "Deployment"
-	}
-	if kind != "Deployment" {
-		return fmt.Errorf("unsupported failover workload kind %q", kind)
-	}
-	name := strings.TrimSpace(pvc.Annotations[AnnotationFailoverWorkloadName])
-	if name == "" {
-		return fmt.Errorf("failover workload name annotation is required")
-	}
-	namespace := strings.TrimSpace(pvc.Annotations[AnnotationFailoverWorkloadNamespace])
-	if namespace == "" {
-		namespace = pvc.Namespace
-	}
-	deployment, err := c.client.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
-	if err != nil {
-		return err
-	}
-	updated := deployment.DeepCopy()
-	if updated.Spec.Template.Spec.NodeSelector != nil {
-		delete(updated.Spec.Template.Spec.NodeSelector, corev1.LabelHostname)
-		if len(updated.Spec.Template.Spec.NodeSelector) == 0 {
-			updated.Spec.Template.Spec.NodeSelector = nil
-		}
-	}
-	if updated.Spec.Template.Spec.NodeSelector == nil {
-		updated.Spec.Template.Spec.NodeSelector = make(map[string]string)
-	}
-	updated.Spec.Template.Spec.NodeSelector[RoleLabel(pvc.Namespace, pvc.Name)] = "active"
-	if deploymentSchedulingEqual(deployment, updated) {
-		return nil
-	}
-	_, err = c.client.AppsV1().Deployments(namespace).Update(ctx, updated, metav1.UpdateOptions{})
-	return err
-}
-
 func failoverEnabled(pvc *corev1.PersistentVolumeClaim, storageClass string) bool {
 	if !replicationEnabled(pvc, storageClass) {
 		return false
@@ -480,10 +438,6 @@ func hasHealthyClaimPod(pods []corev1.Pod, readyNodes map[string]bool) bool {
 
 func pvcKey(pvc *corev1.PersistentVolumeClaim) string {
 	return pvc.Namespace + "/" + pvc.Name
-}
-
-func deploymentSchedulingEqual(before, after *appsv1.Deployment) bool {
-	return reflect.DeepEqual(before.Spec.Template.Spec.NodeSelector, after.Spec.Template.Spec.NodeSelector)
 }
 
 func failoverWorkloadRequests(pods []corev1.Pod) corev1.ResourceList {
