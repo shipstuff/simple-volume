@@ -14,11 +14,17 @@ import (
 type recordingRunner struct {
 	specs []CommandSpec
 	err   error
+	out   []byte
 }
 
 func (r *recordingRunner) Run(_ context.Context, spec CommandSpec) error {
 	r.specs = append(r.specs, spec)
 	return r.err
+}
+
+func (r *recordingRunner) RunOutput(_ context.Context, spec CommandSpec) ([]byte, error) {
+	r.specs = append(r.specs, spec)
+	return r.out, r.err
 }
 
 func containsArg(args []string, want string) bool {
@@ -250,6 +256,42 @@ func TestApplyEventBatchRemovesTargetWhenSourceDisappearsAfterCopyFailure(t *tes
 	}
 	if _, err := os.Stat(target); !os.IsNotExist(err) {
 		t.Fatalf("target was not removed after disappeared source: %v", err)
+	}
+}
+
+func TestApplyEventBatchRemovesTargetForRcloneMissingSourceOutput(t *testing.T) {
+	dir := t.TempDir()
+	pool := Pool{Name: "default", Path: dir}
+	if err := EnsurePool(pool, false); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "default", "demo", "save", "068848.sst")
+	if err := writeFile(target, "old"); err != nil {
+		t.Fatal(err)
+	}
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}))
+	defer source.Close()
+
+	runner := &recordingRunner{
+		err: errors.New("exit status 3"),
+		out: []byte("ERROR : webdav root 'default/demo/save/068848.sst': error reading source root directory: directory not found\nFailed to copyto: directory not found\n"),
+	}
+	err := ApplyEventBatch(context.Background(), runner, pool, EventBatch{
+		Namespace: "default",
+		Volume:    "demo",
+		Source:    SourceRef{WebDAVURL: source.URL},
+		Events:    []FileEvent{{Path: "save/068848.sst", Op: EventOpUpsert}},
+	})
+	if err != nil {
+		t.Fatalf("ApplyEventBatch returned error: %v", err)
+	}
+	if len(runner.specs) != 1 {
+		t.Fatalf("ran %d commands, want 1", len(runner.specs))
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("target was not removed after rclone missing-source output: %v", err)
 	}
 }
 

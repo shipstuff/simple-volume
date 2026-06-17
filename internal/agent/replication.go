@@ -1,8 +1,10 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -64,6 +66,10 @@ type Runner interface {
 	Run(ctx context.Context, spec CommandSpec) error
 }
 
+type OutputRunner interface {
+	RunOutput(ctx context.Context, spec CommandSpec) ([]byte, error)
+}
+
 type ExecRunner struct{}
 
 func (ExecRunner) Run(ctx context.Context, spec CommandSpec) error {
@@ -71,6 +77,27 @@ func (ExecRunner) Run(ctx context.Context, spec CommandSpec) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
+}
+
+func (ExecRunner) RunOutput(ctx context.Context, spec CommandSpec) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, spec.Name, spec.Args...)
+	return cmd.CombinedOutput()
+}
+
+type CommandError struct {
+	Err    error
+	Output []byte
+}
+
+func (e CommandError) Error() string {
+	if len(e.Output) == 0 {
+		return e.Err.Error()
+	}
+	return strings.TrimSpace(string(e.Output)) + ": " + e.Err.Error()
+}
+
+func (e CommandError) Unwrap() error {
+	return e.Err
 }
 
 type sourceExistsResult int
@@ -264,12 +291,12 @@ func ApplyEventBatch(ctx context.Context, runner Runner, pool Pool, batch EventB
 			if err != nil {
 				return err
 			}
-			if err := runner.Run(ctx, spec); err != nil {
+			if err := runEventCopy(ctx, runner, spec); err != nil {
 				exists, existsErr := sourcePathExists(ctx, batch.Source, sourcePath)
 				if existsErr != nil {
 					return err
 				}
-				if exists == sourceExistsNo {
+				if exists == sourceExistsNo || isMissingSourceCopyError(err) {
 					if removeErr := os.RemoveAll(targetPath); removeErr != nil {
 						return removeErr
 					}
@@ -280,6 +307,42 @@ func ApplyEventBatch(ctx context.Context, runner Runner, pool Pool, batch EventB
 		}
 	}
 	return nil
+}
+
+func runEventCopy(ctx context.Context, runner Runner, spec CommandSpec) error {
+	outputRunner, ok := runner.(OutputRunner)
+	if !ok {
+		return runner.Run(ctx, spec)
+	}
+	output, err := outputRunner.RunOutput(ctx, spec)
+	if err == nil {
+		if len(output) > 0 {
+			_, _ = os.Stdout.Write(output)
+		}
+		return nil
+	}
+	if len(output) > 0 && !isMissingSourceOutput(output) {
+		_, _ = os.Stderr.Write(output)
+	}
+	return CommandError{Err: err, Output: output}
+}
+
+func isMissingSourceCopyError(err error) bool {
+	var commandErr CommandError
+	if !errors.As(err, &commandErr) {
+		return false
+	}
+	return isMissingSourceOutput(commandErr.Output)
+}
+
+func isMissingSourceOutput(output []byte) bool {
+	normalized := bytes.ToLower(output)
+	if !bytes.Contains(normalized, []byte("not found")) && !bytes.Contains(normalized, []byte("directory not found")) {
+		return false
+	}
+	return bytes.Contains(normalized, []byte("error reading source")) ||
+		bytes.Contains(normalized, []byte("failed to open source")) ||
+		bytes.Contains(normalized, []byte("webdav root"))
 }
 
 func sourcePathExists(ctx context.Context, source SourceRef, sourcePath string) (sourceExistsResult, error) {
