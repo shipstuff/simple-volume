@@ -25,12 +25,14 @@ func TestWatchManagerSendsWatchedBatches(t *testing.T) {
 	}
 	sender := recordingBatchSender{batches: make(chan EventBatch, 1)}
 	manager := NewWatchManager(pool, sender)
+	uid := int64(10000)
 	status, err := manager.Start(context.Background(), WatchStartRequest{
 		Namespace:    "default",
 		Volume:       "demo",
 		Source:       SourceRef{WebDAVURL: "http://source:8081"},
 		Targets:      []TargetRef{{URL: "http://target:8080", Token: "secret"}},
 		IncludePaths: []string{"save/**"},
+		Ownership:    OwnershipPolicy{UID: &uid},
 		Debounce:     "50ms",
 	})
 	if err != nil {
@@ -38,6 +40,9 @@ func TestWatchManagerSendsWatchedBatches(t *testing.T) {
 	}
 	if !status.Running {
 		t.Fatalf("status = %#v", status)
+	}
+	if status.Ownership.UID == nil || *status.Ownership.UID != 10000 {
+		t.Fatalf("status ownership = %#v", status.Ownership)
 	}
 	defer manager.Stop("default", "demo")
 
@@ -57,6 +62,9 @@ func TestWatchManagerSendsWatchedBatches(t *testing.T) {
 		}
 		if batch.Namespace != "default" || batch.Volume != "demo" || len(batch.Events) == 0 {
 			t.Fatalf("batch = %#v", batch)
+		}
+		if batch.Ownership.UID == nil || *batch.Ownership.UID != 10000 {
+			t.Fatalf("batch ownership = %#v", batch.Ownership)
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("timed out waiting for sent batch")

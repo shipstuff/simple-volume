@@ -127,6 +127,59 @@ func TestDesiredReplicationsFallsBackToPVCActiveNode(t *testing.T) {
 	}
 }
 
+func TestDesiredReplicationsInfersOwnershipFromActivePodSecurityContext(t *testing.T) {
+	storageClass := "simple-volume"
+	runAsUser := int64(10000)
+	runAsGroup := int64(10000)
+	fileMode := "0664"
+	writer := workloadPod("writer", "default", "kapolei-pacific-1", "data")
+	writer.Spec.SecurityContext = &corev1.PodSecurityContext{
+		RunAsUser:  &runAsUser,
+		RunAsGroup: &runAsGroup,
+	}
+	client := fake.NewSimpleClientset(
+		&corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "data",
+				Namespace: "default",
+				Annotations: map[string]string{
+					AnnotationReplicationEnabled:  "true",
+					AnnotationReplicationFileMode: fileMode,
+				},
+			},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				StorageClassName: &storageClass,
+				VolumeName:       "pvc-123",
+			},
+		},
+		writer,
+		agentPod("agent-kap", "kapolei-pacific-1", "10.0.0.10"),
+		agentPod("agent-sf", "sf-west-1", "10.0.0.11"),
+	)
+	controller := NewReplicationController(client, ReplicationControllerConfig{
+		Namespace:        "simple-volume-system",
+		StorageClassName: storageClass,
+	})
+
+	desired, err := controller.DesiredReplications(context.Background(), "secret")
+	if err != nil {
+		t.Fatalf("DesiredReplications returned error: %v", err)
+	}
+	if len(desired) != 1 {
+		t.Fatalf("desired = %#v", desired)
+	}
+	ownership := desired[0].Ownership
+	if ownership.UID == nil || *ownership.UID != 10000 {
+		t.Fatalf("ownership uid = %#v, want 10000", ownership.UID)
+	}
+	if ownership.GID == nil || *ownership.GID != 10000 {
+		t.Fatalf("ownership gid = %#v, want 10000", ownership.GID)
+	}
+	if ownership.FileMode == nil || *ownership.FileMode != 0o664 {
+		t.Fatalf("ownership file mode = %#v, want 0664", ownership.FileMode)
+	}
+}
+
 func TestReconcileOneStartsWatchAndRunsStartupFullSyncOnce(t *testing.T) {
 	var watchStarts atomic.Int32
 	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -139,6 +192,9 @@ func TestReconcileOneStartsWatchAndRunsStartupFullSyncOnce(t *testing.T) {
 			}
 			if req.Volume != "pvc-123" || len(req.Targets) != 2 {
 				t.Fatalf("watch request = %#v", req)
+			}
+			if req.Ownership.UID == nil || *req.Ownership.UID != 10000 {
+				t.Fatalf("watch ownership = %#v", req.Ownership)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 		case "/replication/watch/status":
@@ -154,6 +210,13 @@ func TestReconcileOneStartsWatchAndRunsStartupFullSyncOnce(t *testing.T) {
 		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path != "/replication/full-sync" {
 				t.Fatalf("target path = %s", r.URL.Path)
+			}
+			var req agent.FullSyncRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode full-sync request: %v", err)
+			}
+			if req.Ownership.UID == nil || *req.Ownership.UID != 10000 {
+				t.Fatalf("full-sync ownership = %#v", req.Ownership)
 			}
 			fullSyncs.Add(1)
 			_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
@@ -176,8 +239,12 @@ func TestReconcileOneStartsWatchAndRunsStartupFullSyncOnce(t *testing.T) {
 			{Node: "fresno-west-1", Ref: agent.TargetRef{URL: targetB.URL, Token: "secret"}},
 		},
 		IncludePaths: []string{"writes.log"},
-		Debounce:     "2s",
-		FullSync:     true,
+		Ownership: agent.OwnershipPolicy{
+			UID: int64Ptr(10000),
+			GID: int64Ptr(10000),
+		},
+		Debounce: "2s",
+		FullSync: true,
 	}
 
 	if err := controller.reconcileOne(context.Background(), desired, "secret", time.Date(2026, 6, 15, 3, 0, 0, 0, time.UTC)); err != nil {
@@ -188,6 +255,22 @@ func TestReconcileOneStartsWatchAndRunsStartupFullSyncOnce(t *testing.T) {
 	}
 	waitFor(t, time.Second, func() bool { return fullSyncs.Load() == 2 })
 	waitFor(t, time.Second, func() bool { return watchStarts.Load() == 1 })
+	freshness := controller.failover.freshnessForPVC(&corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default"},
+		Spec:       corev1.PersistentVolumeClaimSpec{VolumeName: "pvc-123"},
+	})
+	if len(freshness) != 2 {
+		t.Fatalf("freshness = %#v, want 2 replicas", freshness)
+	}
+	reconcileStart := time.Date(2026, 6, 15, 3, 0, 0, 0, time.UTC)
+	for node, replica := range freshness {
+		if !replica.Healthy {
+			t.Fatalf("replica %s healthy = false", node)
+		}
+		if !replica.LastSuccessfulSync.After(reconcileStart) {
+			t.Fatalf("replica %s freshness = %v, want after %v", node, replica.LastSuccessfulSync, reconcileStart)
+		}
+	}
 	if err := controller.reconcileOne(context.Background(), desired, "secret", time.Date(2026, 6, 15, 3, 1, 0, 0, time.UTC)); err != nil {
 		t.Fatalf("second reconcileOne returned error: %v", err)
 	}

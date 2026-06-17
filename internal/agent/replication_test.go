@@ -133,6 +133,9 @@ func TestBuildRcloneCopyToCommand(t *testing.T) {
 		t.Fatalf("target arg = %q; args=%#v", spec.Args[len(spec.Args)-1], spec.Args)
 	}
 	assertLowMemoryRcloneArgs(t, spec.Args)
+	if !containsArg(spec.Args, "--metadata") {
+		t.Fatalf("args missing --metadata: %#v", spec.Args)
+	}
 }
 
 func TestBuildRcloneFullSyncCommandUsesOrderedFilters(t *testing.T) {
@@ -155,6 +158,9 @@ func TestBuildRcloneFullSyncCommandUsesOrderedFilters(t *testing.T) {
 		}
 	}
 	assertLowMemoryRcloneArgs(t, spec.Args)
+	if !containsArg(spec.Args, "--metadata") {
+		t.Fatalf("args missing --metadata: %#v", spec.Args)
+	}
 }
 
 func assertLowMemoryRcloneArgs(t *testing.T, args []string) {
@@ -211,6 +217,38 @@ func TestApplyEventBatchRunsCopyAndDelete(t *testing.T) {
 	if _, err := os.Stat(deleteTarget); !os.IsNotExist(err) {
 		t.Fatalf("delete target still exists")
 	}
+}
+
+func TestApplyEventBatchAppliesOwnershipPolicyModes(t *testing.T) {
+	dir := t.TempDir()
+	pool := Pool{Name: "default", Path: dir}
+	if err := EnsurePool(pool, false); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "default", "demo", "save", "a.txt")
+	if err := writeFile(target, "new"); err != nil {
+		t.Fatal(err)
+	}
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer source.Close()
+	fileMode := uint32(0o660)
+	dirMode := uint32(0o770)
+
+	runner := &recordingRunner{}
+	err := ApplyEventBatch(context.Background(), runner, pool, EventBatch{
+		Namespace: "default",
+		Volume:    "demo",
+		Source:    SourceRef{WebDAVURL: source.URL},
+		Ownership: OwnershipPolicy{FileMode: &fileMode, DirMode: &dirMode},
+		Events:    []FileEvent{{Path: "save/a.txt", Op: EventOpUpsert}},
+	})
+	if err != nil {
+		t.Fatalf("ApplyEventBatch returned error: %v", err)
+	}
+	assertMode(t, target, 0o660)
+	assertMode(t, filepath.Dir(target), 0o770)
 }
 
 func TestApplyEventBatchRemovesTargetWhenSourceAlreadyGone(t *testing.T) {
@@ -386,6 +424,43 @@ func TestApplyFullSyncCanBackupExistingTarget(t *testing.T) {
 	}
 	if len(runner.specs) != 1 {
 		t.Fatalf("ran %d commands, want 1", len(runner.specs))
+	}
+}
+
+func TestApplyFullSyncAppliesOwnershipPolicyModes(t *testing.T) {
+	dir := t.TempDir()
+	pool := Pool{Name: "default", Path: dir}
+	if err := EnsurePool(pool, false); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "default", "demo", "save", "a.txt")
+	if err := writeFile(target, "state"); err != nil {
+		t.Fatal(err)
+	}
+	fileMode := uint32(0o664)
+	dirMode := uint32(0o775)
+	runner := &recordingRunner{}
+	err := ApplyFullSync(context.Background(), runner, pool, FullSyncRequest{
+		Namespace: "default",
+		Volume:    "demo",
+		Source:    SourceRef{WebDAVURL: "http://source:8081"},
+		Ownership: OwnershipPolicy{FileMode: &fileMode, DirMode: &dirMode},
+	})
+	if err != nil {
+		t.Fatalf("ApplyFullSync returned error: %v", err)
+	}
+	assertMode(t, target, 0o664)
+	assertMode(t, filepath.Dir(target), 0o775)
+}
+
+func assertMode(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != want {
+		t.Fatalf("%s mode = %o, want %o", path, got, want)
 	}
 }
 

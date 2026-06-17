@@ -25,12 +25,16 @@ import (
 )
 
 const (
-	AnnotationReplicationEnabled = LabelPrefix + "/replication-enabled"
-	AnnotationIncludePaths       = LabelPrefix + "/replication-include-paths"
-	AnnotationExcludePaths       = LabelPrefix + "/replication-exclude-paths"
-	AnnotationDebounce           = LabelPrefix + "/replication-debounce"
-	AnnotationFullSyncOnStart    = LabelPrefix + "/replication-full-sync-on-start"
-	AnnotationFullSyncSchedule   = LabelPrefix + "/replication-full-sync-schedule"
+	AnnotationReplicationEnabled  = LabelPrefix + "/replication-enabled"
+	AnnotationIncludePaths        = LabelPrefix + "/replication-include-paths"
+	AnnotationExcludePaths        = LabelPrefix + "/replication-exclude-paths"
+	AnnotationDebounce            = LabelPrefix + "/replication-debounce"
+	AnnotationFullSyncOnStart     = LabelPrefix + "/replication-full-sync-on-start"
+	AnnotationFullSyncSchedule    = LabelPrefix + "/replication-full-sync-schedule"
+	AnnotationReplicationOwnerUID = LabelPrefix + "/replication-owner-uid"
+	AnnotationReplicationOwnerGID = LabelPrefix + "/replication-owner-gid"
+	AnnotationReplicationFileMode = LabelPrefix + "/replication-file-mode"
+	AnnotationReplicationDirMode  = LabelPrefix + "/replication-dir-mode"
 )
 
 type ReplicationControllerConfig struct {
@@ -70,6 +74,7 @@ type DesiredReplication struct {
 	Targets      []DesiredTarget
 	IncludePaths []string
 	ExcludePaths []string
+	Ownership    agent.OwnershipPolicy
 	Debounce     string
 	FullSync     bool
 	FullSchedule string
@@ -186,9 +191,16 @@ func (c *ReplicationController) DesiredReplications(ctx context.Context, token s
 		if err != nil {
 			return nil, err
 		}
+		ownership := agent.OwnershipPolicy{}
 		if ok {
 			activeNode = activePod.Spec.NodeName
+			ownership = inferOwnershipFromPod(activePod, pvc.Name)
 		}
+		annotationOwnership, err := ownershipPolicyFromAnnotations(pvc.Annotations)
+		if err != nil {
+			return nil, fmt.Errorf("pvc %s/%s ownership annotations: %w", pvc.Namespace, pvc.Name, err)
+		}
+		ownership = mergeOwnershipPolicy(ownership, annotationOwnership)
 		if activeNode == "" {
 			log.Printf("replication pvc %s/%s has no running active pod or active-node annotation", pvc.Namespace, pvc.Name)
 			continue
@@ -225,6 +237,7 @@ func (c *ReplicationController) DesiredReplications(ctx context.Context, token s
 			Targets:      targets,
 			IncludePaths: csvAnnotation(pvc.Annotations[AnnotationIncludePaths]),
 			ExcludePaths: csvAnnotation(pvc.Annotations[AnnotationExcludePaths]),
+			Ownership:    ownership,
 			Debounce:     strings.TrimSpace(pvc.Annotations[AnnotationDebounce]),
 			FullSync:     truthy(pvc.Annotations[AnnotationFullSyncOnStart]),
 			FullSchedule: strings.TrimSpace(pvc.Annotations[AnnotationFullSyncSchedule]),
@@ -349,6 +362,7 @@ func (c *ReplicationController) startWatch(ctx context.Context, desired DesiredR
 		Targets:      targetRefs(desired.Targets),
 		IncludePaths: desired.IncludePaths,
 		ExcludePaths: desired.ExcludePaths,
+		Ownership:    desired.Ownership,
 		Debounce:     desired.Debounce,
 	}
 	return c.postJSON(ctx, strings.TrimRight(agentHTTPURLFromWebDAV(desired.SourceURL), "/")+"/replication/watch/start", token, req)
@@ -381,7 +395,7 @@ func (c *ReplicationController) watchStatus(ctx context.Context, desired Desired
 	return status, nil
 }
 
-func (c *ReplicationController) fullSyncTargets(ctx context.Context, desired DesiredReplication, token string, now time.Time) error {
+func (c *ReplicationController) fullSyncTargets(ctx context.Context, desired DesiredReplication, token string, _ time.Time) error {
 	var errs []string
 	for _, target := range desired.Targets {
 		backupExisting := c.failover.ShouldBackupBeforeRestore(desired.Namespace, desired.Volume, target.Node)
@@ -391,13 +405,14 @@ func (c *ReplicationController) fullSyncTargets(ctx context.Context, desired Des
 			Source:         agent.SourceRef{WebDAVURL: desired.SourceURL},
 			IncludePaths:   desired.IncludePaths,
 			ExcludePaths:   desired.ExcludePaths,
+			Ownership:      desired.Ownership,
 			BackupExisting: backupExisting,
 		}
 		if err := c.postJSON(ctx, strings.TrimRight(target.Ref.URL, "/")+"/replication/full-sync", token, req); err != nil {
 			errs = append(errs, err.Error())
 			continue
 		}
-		c.failover.RecordReplicaFreshness(desired.Namespace, desired.Volume, target.Node, now, true)
+		c.failover.RecordReplicaFreshness(desired.Namespace, desired.Volume, target.Node, time.Now(), true)
 		if backupExisting {
 			c.failover.MarkRestored(desired.Namespace, desired.Volume, target.Node)
 		}
@@ -555,6 +570,8 @@ func (d DesiredReplication) signature() string {
 	b.WriteString("|")
 	b.WriteString(strings.Join(d.ExcludePaths, ","))
 	b.WriteString("|")
+	b.WriteString(ownershipSignature(d.Ownership))
+	b.WriteString("|")
 	b.WriteString(d.Debounce)
 	return b.String()
 }
@@ -615,4 +632,155 @@ func parseSingleCronNumber(field string, min, max int) (int, bool) {
 		return 0, false
 	}
 	return value, true
+}
+
+func inferOwnershipFromPod(pod corev1.Pod, claim string) agent.OwnershipPolicy {
+	var policy agent.OwnershipPolicy
+	claimVolumes := claimVolumeNames(pod, claim)
+	if len(claimVolumes) == 0 {
+		return policy
+	}
+	if pod.Spec.SecurityContext != nil {
+		if pod.Spec.SecurityContext.RunAsUser != nil {
+			policy.UID = int64Ptr(*pod.Spec.SecurityContext.RunAsUser)
+		}
+		if pod.Spec.SecurityContext.RunAsGroup != nil {
+			policy.GID = int64Ptr(*pod.Spec.SecurityContext.RunAsGroup)
+		} else if pod.Spec.SecurityContext.FSGroup != nil {
+			policy.GID = int64Ptr(*pod.Spec.SecurityContext.FSGroup)
+		}
+	}
+	if policy.UID != nil && policy.GID != nil {
+		return policy
+	}
+	containers := append([]corev1.Container{}, pod.Spec.InitContainers...)
+	containers = append(containers, pod.Spec.Containers...)
+	for _, container := range containers {
+		if !containerMountsAnyVolume(container, claimVolumes) || container.SecurityContext == nil {
+			continue
+		}
+		if policy.UID == nil && container.SecurityContext.RunAsUser != nil {
+			policy.UID = int64Ptr(*container.SecurityContext.RunAsUser)
+		}
+		if policy.GID == nil && container.SecurityContext.RunAsGroup != nil {
+			policy.GID = int64Ptr(*container.SecurityContext.RunAsGroup)
+		}
+		if policy.UID != nil && policy.GID != nil {
+			break
+		}
+	}
+	return policy
+}
+
+func claimVolumeNames(pod corev1.Pod, claim string) map[string]bool {
+	out := make(map[string]bool)
+	for _, volume := range pod.Spec.Volumes {
+		if volume.PersistentVolumeClaim != nil && volume.PersistentVolumeClaim.ClaimName == claim {
+			out[volume.Name] = true
+		}
+	}
+	return out
+}
+
+func containerMountsAnyVolume(container corev1.Container, volumeNames map[string]bool) bool {
+	for _, mount := range container.VolumeMounts {
+		if volumeNames[mount.Name] {
+			return true
+		}
+	}
+	return false
+}
+
+func ownershipPolicyFromAnnotations(annotations map[string]string) (agent.OwnershipPolicy, error) {
+	var policy agent.OwnershipPolicy
+	uid, err := parseOptionalInt64Annotation(annotations, AnnotationReplicationOwnerUID)
+	if err != nil {
+		return policy, err
+	}
+	gid, err := parseOptionalInt64Annotation(annotations, AnnotationReplicationOwnerGID)
+	if err != nil {
+		return policy, err
+	}
+	fileMode, err := parseOptionalModeAnnotation(annotations, AnnotationReplicationFileMode)
+	if err != nil {
+		return policy, err
+	}
+	dirMode, err := parseOptionalModeAnnotation(annotations, AnnotationReplicationDirMode)
+	if err != nil {
+		return policy, err
+	}
+	policy.UID = uid
+	policy.GID = gid
+	policy.FileMode = fileMode
+	policy.DirMode = dirMode
+	return policy, nil
+}
+
+func parseOptionalInt64Annotation(annotations map[string]string, key string) (*int64, error) {
+	value := strings.TrimSpace(annotations[key])
+	if value == "" {
+		return nil, nil
+	}
+	parsed, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || parsed < 0 {
+		return nil, fmt.Errorf("%s must be a non-negative integer", key)
+	}
+	return int64Ptr(parsed), nil
+}
+
+func parseOptionalModeAnnotation(annotations map[string]string, key string) (*uint32, error) {
+	value := strings.TrimSpace(annotations[key])
+	if value == "" {
+		return nil, nil
+	}
+	parsed, err := strconv.ParseUint(value, 8, 32)
+	if err != nil || parsed > 0o7777 {
+		return nil, fmt.Errorf("%s must be an octal mode such as 0664", key)
+	}
+	mode := uint32(parsed)
+	return &mode, nil
+}
+
+func mergeOwnershipPolicy(base, override agent.OwnershipPolicy) agent.OwnershipPolicy {
+	if override.UID != nil {
+		base.UID = override.UID
+	}
+	if override.GID != nil {
+		base.GID = override.GID
+	}
+	if override.FileMode != nil {
+		base.FileMode = override.FileMode
+	}
+	if override.DirMode != nil {
+		base.DirMode = override.DirMode
+	}
+	return base
+}
+
+func ownershipSignature(policy agent.OwnershipPolicy) string {
+	parts := []string{
+		"uid=" + optionalInt64String(policy.UID),
+		"gid=" + optionalInt64String(policy.GID),
+		"fileMode=" + optionalModeString(policy.FileMode),
+		"dirMode=" + optionalModeString(policy.DirMode),
+	}
+	return strings.Join(parts, ",")
+}
+
+func optionalInt64String(value *int64) string {
+	if value == nil {
+		return ""
+	}
+	return strconv.FormatInt(*value, 10)
+}
+
+func optionalModeString(value *uint32) string {
+	if value == nil {
+		return ""
+	}
+	return strconv.FormatUint(uint64(*value), 8)
+}
+
+func int64Ptr(value int64) *int64 {
+	return &value
 }

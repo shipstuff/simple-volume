@@ -26,7 +26,7 @@ node:
         cpu: 10m
         memory: 64Mi
       limits:
-        memory: 128Mi
+        memory: 1Gi
   csiNode:
     resources:
       requests:

@@ -120,6 +120,20 @@ metadata:
     simple-volume.shipstuff.io/replication-full-sync-schedule: "0 4 * * *"
 ```
 
+Replication uses rclone metadata preservation and the controller infers replica
+file ownership from the active pod's `runAsUser`, `runAsGroup`, or `fsGroup`
+when available. PVC annotations can override this for workloads without a pod
+security context:
+
+```yaml
+metadata:
+  annotations:
+    simple-volume.shipstuff.io/replication-owner-uid: "10000"
+    simple-volume.shipstuff.io/replication-owner-gid: "10000"
+    simple-volume.shipstuff.io/replication-file-mode: "0664"
+    simple-volume.shipstuff.io/replication-dir-mode: "0775"
+```
+
 The current schedule parser intentionally supports exact minute/hour cron
 windows such as `0 4 * * *`; ranges and step expressions are left for the
 controller-runtime implementation.

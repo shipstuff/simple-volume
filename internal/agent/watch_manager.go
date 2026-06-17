@@ -18,13 +18,14 @@ type TargetRef struct {
 }
 
 type WatchStartRequest struct {
-	Namespace    string      `json:"namespace,omitempty"`
-	Volume       string      `json:"volume"`
-	Source       SourceRef   `json:"source"`
-	Targets      []TargetRef `json:"targets"`
-	IncludePaths []string    `json:"includePaths,omitempty"`
-	ExcludePaths []string    `json:"excludePaths,omitempty"`
-	Debounce     string      `json:"debounce,omitempty"`
+	Namespace    string          `json:"namespace,omitempty"`
+	Volume       string          `json:"volume"`
+	Source       SourceRef       `json:"source"`
+	Targets      []TargetRef     `json:"targets"`
+	IncludePaths []string        `json:"includePaths,omitempty"`
+	ExcludePaths []string        `json:"excludePaths,omitempty"`
+	Ownership    OwnershipPolicy `json:"ownership,omitempty"`
+	Debounce     string          `json:"debounce,omitempty"`
 }
 
 type WatchStopRequest struct {
@@ -33,24 +34,25 @@ type WatchStopRequest struct {
 }
 
 type WatchStatus struct {
-	Namespace            string         `json:"namespace,omitempty"`
-	Volume               string         `json:"volume"`
-	Source               SourceRef      `json:"source"`
-	Targets              []TargetRef    `json:"targets"`
-	TargetStatuses       []TargetStatus `json:"targetStatuses,omitempty"`
-	IncludePaths         []string       `json:"includePaths,omitempty"`
-	ExcludePaths         []string       `json:"excludePaths,omitempty"`
-	Running              bool           `json:"running"`
-	StartedAt            time.Time      `json:"startedAt"`
-	StoppedAt            *time.Time     `json:"stoppedAt,omitempty"`
-	LastBatchAt          *time.Time     `json:"lastBatchAt,omitempty"`
-	LastBatchEventCount  int            `json:"lastBatchEventCount,omitempty"`
-	LastBatchGeneration  string         `json:"lastBatchGeneration,omitempty"`
-	LastDeliveryError    string         `json:"lastDeliveryError,omitempty"`
-	LastWatchError       string         `json:"lastWatchError,omitempty"`
-	DeliveredBatchCount  int64          `json:"deliveredBatchCount,omitempty"`
-	DeliveredEventCount  int64          `json:"deliveredEventCount,omitempty"`
-	DeliveryFailureCount int64          `json:"deliveryFailureCount,omitempty"`
+	Namespace            string          `json:"namespace,omitempty"`
+	Volume               string          `json:"volume"`
+	Source               SourceRef       `json:"source"`
+	Targets              []TargetRef     `json:"targets"`
+	TargetStatuses       []TargetStatus  `json:"targetStatuses,omitempty"`
+	IncludePaths         []string        `json:"includePaths,omitempty"`
+	ExcludePaths         []string        `json:"excludePaths,omitempty"`
+	Ownership            OwnershipPolicy `json:"ownership,omitempty"`
+	Running              bool            `json:"running"`
+	StartedAt            time.Time       `json:"startedAt"`
+	StoppedAt            *time.Time      `json:"stoppedAt,omitempty"`
+	LastBatchAt          *time.Time      `json:"lastBatchAt,omitempty"`
+	LastBatchEventCount  int             `json:"lastBatchEventCount,omitempty"`
+	LastBatchGeneration  string          `json:"lastBatchGeneration,omitempty"`
+	LastDeliveryError    string          `json:"lastDeliveryError,omitempty"`
+	LastWatchError       string          `json:"lastWatchError,omitempty"`
+	DeliveredBatchCount  int64           `json:"deliveredBatchCount,omitempty"`
+	DeliveredEventCount  int64           `json:"deliveredEventCount,omitempty"`
+	DeliveryFailureCount int64           `json:"deliveryFailureCount,omitempty"`
 }
 
 type TargetStatus struct {
@@ -157,6 +159,7 @@ func (m *WatchManager) Start(ctx context.Context, req WatchStartRequest) (WatchS
 		TargetStatuses: initialTargetStatuses(req.Targets),
 		IncludePaths:   append([]string(nil), req.IncludePaths...),
 		ExcludePaths:   append([]string(nil), req.ExcludePaths...),
+		Ownership:      req.Ownership,
 		Running:        true,
 		StartedAt:      time.Now().UTC(),
 	}
@@ -176,7 +179,7 @@ func (m *WatchManager) Start(ctx context.Context, req WatchStartRequest) (WatchS
 		IncludePaths: req.IncludePaths,
 		ExcludePaths: req.ExcludePaths,
 		Debounce:     debounce,
-	}, req.Source, append([]TargetRef(nil), req.Targets...))
+	}, req.Source, append([]TargetRef(nil), req.Targets...), req.Ownership)
 
 	return status, nil
 }
@@ -290,9 +293,10 @@ func (m *WatchManager) StatusHandler(auth TokenAuthorizer) http.HandlerFunc {
 	}
 }
 
-func (m *WatchManager) run(ctx context.Context, key string, watch *managedWatch, cfg WatchConfig, source SourceRef, targets []TargetRef) {
+func (m *WatchManager) run(ctx context.Context, key string, watch *managedWatch, cfg WatchConfig, source SourceRef, targets []TargetRef, ownership OwnershipPolicy) {
 	err := WatchVolume(ctx, cfg, func(ctx context.Context, batch EventBatch) error {
 		batch.Source = source
+		batch.Ownership = ownership
 		for _, target := range targets {
 			if err := m.sender.SendBatch(ctx, target, batch); err != nil {
 				m.recordDeliveryError(key, watch, target, err)

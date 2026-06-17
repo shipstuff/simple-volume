@@ -30,11 +30,12 @@ type FileEvent struct {
 }
 
 type EventBatch struct {
-	Namespace  string      `json:"namespace,omitempty"`
-	Volume     string      `json:"volume"`
-	Generation string      `json:"generation,omitempty"`
-	Source     SourceRef   `json:"source"`
-	Events     []FileEvent `json:"events"`
+	Namespace  string          `json:"namespace,omitempty"`
+	Volume     string          `json:"volume"`
+	Generation string          `json:"generation,omitempty"`
+	Source     SourceRef       `json:"source"`
+	Ownership  OwnershipPolicy `json:"ownership,omitempty"`
+	Events     []FileEvent     `json:"events"`
 }
 
 type SourceRef struct {
@@ -44,12 +45,24 @@ type SourceRef struct {
 }
 
 type FullSyncRequest struct {
-	Namespace      string    `json:"namespace,omitempty"`
-	Volume         string    `json:"volume"`
-	Source         SourceRef `json:"source"`
-	IncludePaths   []string  `json:"includePaths,omitempty"`
-	ExcludePaths   []string  `json:"excludePaths,omitempty"`
-	BackupExisting bool      `json:"backupExisting,omitempty"`
+	Namespace      string          `json:"namespace,omitempty"`
+	Volume         string          `json:"volume"`
+	Source         SourceRef       `json:"source"`
+	IncludePaths   []string        `json:"includePaths,omitempty"`
+	ExcludePaths   []string        `json:"excludePaths,omitempty"`
+	Ownership      OwnershipPolicy `json:"ownership,omitempty"`
+	BackupExisting bool            `json:"backupExisting,omitempty"`
+}
+
+type OwnershipPolicy struct {
+	UID      *int64  `json:"uid,omitempty"`
+	GID      *int64  `json:"gid,omitempty"`
+	FileMode *uint32 `json:"fileMode,omitempty"`
+	DirMode  *uint32 `json:"dirMode,omitempty"`
+}
+
+func (p OwnershipPolicy) Empty() bool {
+	return p.UID == nil && p.GID == nil && p.FileMode == nil && p.DirMode == nil
 }
 
 type PathFilter struct {
@@ -261,7 +274,7 @@ func CoalesceEvents(events []FileEvent, filter PathFilter) []FileEvent {
 }
 
 func BuildRcloneServeWebDAVCommand(rootPath, addr string, readOnly bool) CommandSpec {
-	args := []string{"serve", "webdav", rootPath, "--config", "/dev/null", "--addr", addr, "--dir-cache-time", "1s"}
+	args := []string{"serve", "webdav", rootPath, "--config", "/dev/null", "--addr", addr, "--dir-cache-time", "1s", "--metadata"}
 	if readOnly {
 		args = append(args, "--read-only")
 	}
@@ -278,6 +291,7 @@ func BuildRcloneCopyToCommand(source SourceRef, sourcePath, targetPath string) (
 		"--config", "/dev/null",
 		"--webdav-url", strings.TrimRight(source.WebDAVURL, "/"),
 		"--webdav-vendor", "other",
+		"--metadata",
 	}
 	args = appendRcloneLowMemoryArgs(args)
 	if source.User != "" {
@@ -296,6 +310,7 @@ func BuildRcloneFullSyncCommand(source SourceRef, sourceVolume, targetRoot strin
 		"--config", "/dev/null",
 		"--webdav-url", strings.TrimRight(source.WebDAVURL, "/"),
 		"--webdav-vendor", "other",
+		"--metadata",
 	}
 	args = appendRcloneLowMemoryArgs(args)
 	if source.User != "" {
@@ -370,6 +385,9 @@ func ApplyEventBatch(ctx context.Context, runner Runner, pool Pool, batch EventB
 					}
 					continue
 				}
+				return err
+			}
+			if err := ApplyOwnershipPolicy(targetRoot, targetPath, batch.Ownership, true); err != nil {
 				return err
 			}
 		}
@@ -476,7 +494,119 @@ func ApplyFullSync(ctx context.Context, runner Runner, pool Pool, req FullSyncRe
 		IncludePaths: req.IncludePaths,
 		ExcludePaths: req.ExcludePaths,
 	})
-	return runFullSyncCommand(ctx, runner, spec)
+	if err := runFullSyncCommand(ctx, runner, spec); err != nil {
+		return err
+	}
+	return ApplyOwnershipPolicy(targetRoot, targetRoot, req.Ownership, true)
+}
+
+func ApplyOwnershipPolicy(root, target string, policy OwnershipPolicy, recursive bool) error {
+	if policy.Empty() {
+		return nil
+	}
+	root = filepath.Clean(root)
+	target = filepath.Clean(target)
+	rel, err := filepath.Rel(root, target)
+	if err != nil {
+		return err
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("ownership target escapes volume: %s", target)
+	}
+	if err := applyOwnershipToParentDirs(root, target, policy); err != nil {
+		return err
+	}
+	info, err := os.Lstat(target)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if recursive && info.IsDir() {
+		return filepath.WalkDir(target, func(p string, d os.DirEntry, err error) error {
+			if err != nil {
+				if os.IsNotExist(err) {
+					return nil
+				}
+				return err
+			}
+			info, err := d.Info()
+			if err != nil {
+				if os.IsNotExist(err) {
+					return nil
+				}
+				return err
+			}
+			return applyOwnershipToOne(p, info, policy)
+		})
+	}
+	return applyOwnershipToOne(target, info, policy)
+}
+
+func applyOwnershipToParentDirs(root, target string, policy OwnershipPolicy) error {
+	dir := target
+	if info, err := os.Lstat(target); err == nil && !info.IsDir() {
+		dir = filepath.Dir(target)
+	} else if err != nil && os.IsNotExist(err) {
+		dir = filepath.Dir(target)
+	} else if err != nil {
+		return err
+	}
+	for {
+		info, err := os.Lstat(dir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		if err := applyOwnershipToOne(dir, info, OwnershipPolicy{
+			UID:     policy.UID,
+			GID:     policy.GID,
+			DirMode: policy.DirMode,
+		}); err != nil {
+			return err
+		}
+		if dir == root {
+			return nil
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return nil
+		}
+		dir = parent
+	}
+}
+
+func applyOwnershipToOne(p string, info os.FileInfo, policy OwnershipPolicy) error {
+	if policy.UID != nil || policy.GID != nil {
+		uid := -1
+		gid := -1
+		if policy.UID != nil {
+			uid = int(*policy.UID)
+		}
+		if policy.GID != nil {
+			gid = int(*policy.GID)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			if err := os.Lchown(p, uid, gid); err != nil {
+				return err
+			}
+		} else if err := os.Chown(p, uid, gid); err != nil {
+			return err
+		}
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil
+	}
+	if info.IsDir() && policy.DirMode != nil {
+		return os.Chmod(p, os.FileMode(*policy.DirMode))
+	}
+	if !info.IsDir() && policy.FileMode != nil {
+		return os.Chmod(p, os.FileMode(*policy.FileMode))
+	}
+	return nil
 }
 
 func runFullSyncCommand(ctx context.Context, runner Runner, spec CommandSpec) error {
