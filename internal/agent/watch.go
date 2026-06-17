@@ -80,7 +80,18 @@ func WatchVolume(ctx context.Context, cfg WatchConfig, sink BatchSink) error {
 			}
 			if event.Has(fsnotify.Create) {
 				if info, err := os.Stat(event.Name); err == nil && info.IsDir() && filter.ShouldTraverse(rel) {
-					_ = addRecursiveWatches(watcher, event.Name, filter)
+					if err := addRecursiveWatches(watcher, event.Name, filter); err != nil {
+						return err
+					}
+					created, err := collectExistingEvents(root, event.Name, filter)
+					if err != nil {
+						return err
+					}
+					pending = append(pending, created...)
+					if len(created) > 0 {
+						timer.Reset(debounce)
+					}
+					continue
 				}
 			}
 			if !filter.ShouldReplicate(rel) {
@@ -113,6 +124,33 @@ func addRecursiveWatches(watcher *fsnotify.Watcher, root string, filter PathFilt
 		}
 		return watcher.Add(p)
 	})
+}
+
+func collectExistingEvents(root, start string, filter PathFilter) ([]FileEvent, error) {
+	events := make([]FileEvent, 0)
+	err := filepath.WalkDir(start, func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			if os.IsNotExist(err) {
+				return nil
+			}
+			return err
+		}
+		rel, ok := relativeWatchPath(root, p)
+		if !ok {
+			return nil
+		}
+		if d.IsDir() {
+			if rel != "." && !filter.ShouldTraverse(rel) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if filter.ShouldReplicate(rel) {
+			events = append(events, FileEvent{Path: rel, Op: EventOpUpsert})
+		}
+		return nil
+	})
+	return events, err
 }
 
 func relativeWatchPath(root, p string) (string, bool) {
