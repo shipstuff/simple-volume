@@ -150,6 +150,57 @@ func TestReconcileOneStartsWatchAndRunsStartupFullSyncOnce(t *testing.T) {
 	}
 }
 
+func TestReconcileRunsFailoverBeforeReplicationTokenLookup(t *testing.T) {
+	storageClass := "simple-volume"
+	client := fake.NewSimpleClientset(
+		&corev1.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{Name: "pvc-123"},
+		},
+		&corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "data",
+				Namespace: "default",
+				Annotations: map[string]string{
+					AnnotationReplicationEnabled: "true",
+					AnnotationFailoverEnabled:    "true",
+					AnnotationSelectedNode:       "sf-west-1",
+				},
+			},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				StorageClassName: &storageClass,
+				VolumeName:       "pvc-123",
+			},
+		},
+		workloadPod("writer", "default", "sf-west-1", "data"),
+		readyNode("sf-west-1", true),
+	)
+	controller := NewReplicationController(client, ReplicationControllerConfig{
+		Namespace:        "simple-volume-system",
+		StorageClassName: storageClass,
+	})
+
+	if err := controller.Reconcile(context.Background()); err == nil {
+		t.Fatal("Reconcile returned nil error, want missing token error")
+	}
+	pvc, err := client.CoreV1().PersistentVolumeClaims("default").Get(context.Background(), "data", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get pvc: %v", err)
+	}
+	if got := pvc.Annotations[AnnotationActiveNode]; got != "sf-west-1" {
+		t.Fatalf("pvc active node annotation = %q, want sf-west-1", got)
+	}
+	if _, ok := pvc.Annotations[AnnotationSelectedNode]; ok {
+		t.Fatalf("selected-node annotation should be removed: %#v", pvc.Annotations)
+	}
+	node, err := client.CoreV1().Nodes().Get(context.Background(), "sf-west-1", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get node: %v", err)
+	}
+	if got := node.Labels[RoleLabel("default", "data")]; got != "active" {
+		t.Fatalf("active node label = %q, want active", got)
+	}
+}
+
 func TestShouldRunScheduledFullSync(t *testing.T) {
 	if !shouldRunScheduledFullSync("0 4 * * *", time.Date(2026, 6, 15, 4, 0, 30, 0, time.UTC)) {
 		t.Fatal("expected schedule to match")

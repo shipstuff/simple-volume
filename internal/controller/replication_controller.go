@@ -140,6 +140,11 @@ func (c *ReplicationController) Run(ctx context.Context) error {
 
 func (c *ReplicationController) Reconcile(ctx context.Context) error {
 	now := time.Now()
+	if c.failover != nil {
+		if err := c.failover.Reconcile(ctx, now); err != nil {
+			log.Printf("failover reconcile failed: %v", err)
+		}
+	}
 	token, err := c.syncToken(ctx)
 	if err != nil {
 		return err
@@ -151,11 +156,6 @@ func (c *ReplicationController) Reconcile(ctx context.Context) error {
 	for _, item := range desired {
 		if err := c.reconcileOne(ctx, item, token, now); err != nil {
 			log.Printf("reconcile replication %s/%s: %v", item.Namespace, item.ClaimName, err)
-		}
-	}
-	if c.failover != nil {
-		if err := c.failover.Reconcile(ctx, now); err != nil {
-			log.Printf("failover reconcile failed: %v", err)
 		}
 	}
 	return nil
