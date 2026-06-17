@@ -81,7 +81,11 @@ func (ExecRunner) Run(ctx context.Context, spec CommandSpec) error {
 
 func (ExecRunner) RunOutput(ctx context.Context, spec CommandSpec) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, spec.Name, spec.Args...)
-	return cmd.CombinedOutput()
+	output := &limitedOutput{limit: 64 * 1024}
+	cmd.Stdout = output
+	cmd.Stderr = output
+	err := cmd.Run()
+	return output.Bytes(), err
 }
 
 type CommandError struct {
@@ -107,6 +111,40 @@ const (
 	sourceExistsYes
 	sourceExistsNo
 )
+
+type limitedOutput struct {
+	buf       bytes.Buffer
+	limit     int
+	truncated int
+}
+
+func (o *limitedOutput) Write(p []byte) (int, error) {
+	if o.limit <= 0 {
+		o.truncated += len(p)
+		return len(p), nil
+	}
+	remaining := o.limit - o.buf.Len()
+	if remaining > 0 {
+		if len(p) <= remaining {
+			_, _ = o.buf.Write(p)
+		} else {
+			_, _ = o.buf.Write(p[:remaining])
+			o.truncated += len(p) - remaining
+		}
+	} else {
+		o.truncated += len(p)
+	}
+	return len(p), nil
+}
+
+func (o *limitedOutput) Bytes() []byte {
+	if o.truncated == 0 {
+		return o.buf.Bytes()
+	}
+	out := append([]byte(nil), o.buf.Bytes()...)
+	out = append(out, fmt.Sprintf("\n... truncated %d bytes of command output ...\n", o.truncated)...)
+	return out
+}
 
 func NormalizeEventPath(p string) (string, error) {
 	p = strings.TrimSpace(strings.ReplaceAll(p, "\\", "/"))
@@ -408,7 +446,22 @@ func ApplyFullSync(ctx context.Context, runner Runner, pool Pool, req FullSyncRe
 		IncludePaths: req.IncludePaths,
 		ExcludePaths: req.ExcludePaths,
 	})
-	return runner.Run(ctx, spec)
+	return runFullSyncCommand(ctx, runner, spec)
+}
+
+func runFullSyncCommand(ctx context.Context, runner Runner, spec CommandSpec) error {
+	outputRunner, ok := runner.(OutputRunner)
+	if !ok {
+		return runner.Run(ctx, spec)
+	}
+	output, err := outputRunner.RunOutput(ctx, spec)
+	if err == nil {
+		return nil
+	}
+	if len(output) > 0 {
+		_, _ = os.Stderr.Write(output)
+	}
+	return CommandError{Err: err, Output: output}
 }
 
 func SyncBatchHandler(pool Pool, auth TokenAuthorizer, runner Runner, timeout time.Duration) http.HandlerFunc {
