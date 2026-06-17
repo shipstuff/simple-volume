@@ -104,6 +104,73 @@ func TestFailoverControllerPromotesStorageBindingAndDeletesStalePod(t *testing.T
 	}
 }
 
+func TestFailoverControllerRecordsHealthyActiveNode(t *testing.T) {
+	storageClass := "simple-volume"
+	client := fake.NewSimpleClientset(
+		&corev1.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{Name: "pvc-123"},
+		},
+		&corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "data",
+				Namespace: "default",
+				Annotations: map[string]string{
+					AnnotationReplicationEnabled: "true",
+					AnnotationFailoverEnabled:    "true",
+					AnnotationSelectedNode:       "sf-west-1",
+				},
+			},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				StorageClassName: &storageClass,
+				VolumeName:       "pvc-123",
+			},
+		},
+		workloadPod("writer", "default", "sf-west-1", "data"),
+		readyNode("sf-west-1", true),
+		readyNode("fresno-west-1", true),
+		agentPod("agent-sf", "sf-west-1", "10.0.0.11"),
+		agentPod("agent-fresno", "fresno-west-1", "10.0.0.12"),
+	)
+	controller := NewFailoverController(client, ReplicationControllerConfig{
+		Namespace:          "simple-volume-system",
+		StorageClassName:   storageClass,
+		AgentLabelSelector: "app.kubernetes.io/component=node",
+	})
+	now := time.Date(2026, 6, 15, 5, 0, 0, 0, time.UTC)
+	controller.RecordReplicaFreshness("default", "pvc-123", "fresno-west-1", now.Add(-5*time.Second), true)
+	if err := controller.Reconcile(context.Background(), now); err != nil {
+		t.Fatalf("Reconcile returned error: %v", err)
+	}
+
+	pv, err := client.CoreV1().PersistentVolumes().Get(context.Background(), "pvc-123", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get pv: %v", err)
+	}
+	if got := pv.Annotations[AnnotationActiveNode]; got != "sf-west-1" {
+		t.Fatalf("pv active node annotation = %q, want sf-west-1", got)
+	}
+	pvc, err := client.CoreV1().PersistentVolumeClaims("default").Get(context.Background(), "data", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get pvc: %v", err)
+	}
+	if got := pvc.Annotations[AnnotationActiveNode]; got != "sf-west-1" {
+		t.Fatalf("pvc active node annotation = %q, want sf-west-1", got)
+	}
+	if _, ok := pvc.Annotations[AnnotationSelectedNode]; ok {
+		t.Fatalf("selected-node annotation should be removed: %#v", pvc.Annotations)
+	}
+	activeNode, err := client.CoreV1().Nodes().Get(context.Background(), "sf-west-1", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get active node: %v", err)
+	}
+	if got := activeNode.Labels[RoleLabel("default", "data")]; got != "active" {
+		t.Fatalf("active node label = %q, want active", got)
+	}
+	if _, err := client.CoreV1().Pods("default").Get(context.Background(), "writer", metav1.GetOptions{}); err != nil {
+		t.Fatalf("healthy pod should remain: %v", err)
+	}
+}
+
 func TestFailoverControllerBlocksStaleReplicas(t *testing.T) {
 	storageClass := "simple-volume"
 	client := fake.NewSimpleClientset(
@@ -259,6 +326,7 @@ func TestFailoverControllerMaintainsFreshCandidateLabels(t *testing.T) {
 	storageClass := "simple-volume"
 	candidateLabel := CandidateLabel("default", "data")
 	client := fake.NewSimpleClientset(
+		&corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "pvc-123"}},
 		&corev1.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "data",

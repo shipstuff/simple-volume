@@ -133,6 +133,11 @@ func (c *FailoverController) reconcilePVC(ctx context.Context, pvc *corev1.Persi
 	if activeNode == "" {
 		activeNode = strings.TrimSpace(pvc.Annotations[AnnotationActiveNode])
 	}
+	if activeNode != "" {
+		if err := c.promoteStorageState(ctx, pvc, activeNode, ""); err != nil {
+			return err
+		}
+	}
 	if err := c.reconcileNodeLabels(ctx, pvc, activeNode, candidates); err != nil {
 		return err
 	}
@@ -251,8 +256,10 @@ func (c *FailoverController) promoteStorageState(ctx context.Context, pvc *corev
 	if previousActive != "" {
 		updatedPV.Annotations[AnnotationPreviousActiveNode] = previousActive
 	}
-	if _, err := c.client.CoreV1().PersistentVolumes().Update(ctx, updatedPV, metav1.UpdateOptions{}); err != nil {
-		return err
+	if !reflect.DeepEqual(pv.Annotations, updatedPV.Annotations) {
+		if _, err := c.client.CoreV1().PersistentVolumes().Update(ctx, updatedPV, metav1.UpdateOptions{}); err != nil {
+			return err
+		}
 	}
 
 	latestPVC, err := c.client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Get(ctx, pvc.Name, metav1.GetOptions{})
@@ -268,8 +275,10 @@ func (c *FailoverController) promoteStorageState(ctx context.Context, pvc *corev
 		updatedPVC.Annotations[AnnotationPreviousActiveNode] = previousActive
 	}
 	delete(updatedPVC.Annotations, AnnotationSelectedNode)
-	if _, err := c.client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Update(ctx, updatedPVC, metav1.UpdateOptions{}); err != nil {
-		return err
+	if !reflect.DeepEqual(latestPVC.Annotations, updatedPVC.Annotations) {
+		if _, err := c.client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Update(ctx, updatedPVC, metav1.UpdateOptions{}); err != nil {
+			return err
+		}
 	}
 	return nil
 }
