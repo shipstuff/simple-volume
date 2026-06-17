@@ -181,22 +181,26 @@ func (c *ReplicationController) DesiredReplications(ctx context.Context, token s
 		if pvc.Spec.VolumeName == "" {
 			continue
 		}
+		activeNode := strings.TrimSpace(pvc.Annotations[AnnotationActiveNode])
 		activePod, ok, err := c.activePodForPVC(ctx, pvc.Namespace, pvc.Name)
 		if err != nil {
 			return nil, err
 		}
-		if !ok {
-			log.Printf("replication pvc %s/%s has no running active pod", pvc.Namespace, pvc.Name)
+		if ok {
+			activeNode = activePod.Spec.NodeName
+		}
+		if activeNode == "" {
+			log.Printf("replication pvc %s/%s has no running active pod or active-node annotation", pvc.Namespace, pvc.Name)
 			continue
 		}
-		source, ok := agents[activePod.Spec.NodeName]
+		source, ok := agents[activeNode]
 		if !ok {
-			log.Printf("replication pvc %s/%s active node %s has no ready agent", pvc.Namespace, pvc.Name, activePod.Spec.NodeName)
+			log.Printf("replication pvc %s/%s active node %s has no ready agent", pvc.Namespace, pvc.Name, activeNode)
 			continue
 		}
 		targets := make([]DesiredTarget, 0, len(agents)-1)
 		for node, pod := range agents {
-			if node == activePod.Spec.NodeName {
+			if node == activeNode {
 				continue
 			}
 			targets = append(targets, DesiredTarget{
@@ -216,7 +220,7 @@ func (c *ReplicationController) DesiredReplications(ctx context.Context, token s
 			Namespace:    pvc.Namespace,
 			ClaimName:    pvc.Name,
 			Volume:       pvc.Spec.VolumeName,
-			ActiveNode:   activePod.Spec.NodeName,
+			ActiveNode:   activeNode,
 			SourceURL:    agentWebDAVURL(source.Status.PodIP),
 			Targets:      targets,
 			IncludePaths: csvAnnotation(pvc.Annotations[AnnotationIncludePaths]),

@@ -84,6 +84,49 @@ func TestDesiredReplicationsDiscoversActiveAndReplicaAgents(t *testing.T) {
 	}
 }
 
+func TestDesiredReplicationsFallsBackToPVCActiveNode(t *testing.T) {
+	storageClass := "simple-volume"
+	client := fake.NewSimpleClientset(
+		&corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "data",
+				Namespace: "default",
+				Annotations: map[string]string{
+					AnnotationReplicationEnabled: "true",
+					AnnotationActiveNode:         "sf-west-1",
+				},
+			},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				StorageClassName: &storageClass,
+				VolumeName:       "pvc-123",
+			},
+		},
+		agentPod("agent-sf", "sf-west-1", "10.0.0.11"),
+		agentPod("agent-fresno", "fresno-west-1", "10.0.0.12"),
+	)
+	controller := NewReplicationController(client, ReplicationControllerConfig{
+		Namespace:        "simple-volume-system",
+		StorageClassName: storageClass,
+	})
+
+	desired, err := controller.DesiredReplications(context.Background(), "secret")
+	if err != nil {
+		t.Fatalf("DesiredReplications returned error: %v", err)
+	}
+	if len(desired) != 1 {
+		t.Fatalf("desired = %#v", desired)
+	}
+	if got := desired[0].ActiveNode; got != "sf-west-1" {
+		t.Fatalf("ActiveNode = %q, want sf-west-1", got)
+	}
+	if got := desired[0].SourceURL; got != "http://10.0.0.11:8081" {
+		t.Fatalf("SourceURL = %q, want sf source", got)
+	}
+	if len(desired[0].Targets) != 1 || desired[0].Targets[0].Node != "fresno-west-1" {
+		t.Fatalf("targets = %#v", desired[0].Targets)
+	}
+}
+
 func TestReconcileOneStartsWatchAndRunsStartupFullSyncOnce(t *testing.T) {
 	var watchStarts int
 	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
