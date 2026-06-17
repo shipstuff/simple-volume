@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path"
@@ -71,6 +72,14 @@ func (ExecRunner) Run(ctx context.Context, spec CommandSpec) error {
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
 }
+
+type sourceExistsResult int
+
+const (
+	sourceExistsUnknown sourceExistsResult = iota
+	sourceExistsYes
+	sourceExistsNo
+)
 
 func NormalizeEventPath(p string) (string, error) {
 	p = strings.TrimSpace(strings.ReplaceAll(p, "\\", "/"))
@@ -241,16 +250,70 @@ func ApplyEventBatch(ctx context.Context, runner Runner, pool Pool, batch EventB
 		default:
 			sourcePath := path.Join(safeSegment(batch.Namespace), safeSegment(batch.Volume), event.Path)
 			targetPath := filepath.Join(targetRoot, filepath.FromSlash(event.Path))
+			exists, err := sourcePathExists(ctx, batch.Source, sourcePath)
+			if err != nil {
+				return err
+			}
+			if exists == sourceExistsNo {
+				if err := os.RemoveAll(targetPath); err != nil {
+					return err
+				}
+				continue
+			}
 			spec, err := BuildRcloneCopyToCommand(batch.Source, sourcePath, targetPath)
 			if err != nil {
 				return err
 			}
 			if err := runner.Run(ctx, spec); err != nil {
+				exists, existsErr := sourcePathExists(ctx, batch.Source, sourcePath)
+				if existsErr != nil {
+					return err
+				}
+				if exists == sourceExistsNo {
+					if removeErr := os.RemoveAll(targetPath); removeErr != nil {
+						return removeErr
+					}
+					continue
+				}
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+func sourcePathExists(ctx context.Context, source SourceRef, sourcePath string) (sourceExistsResult, error) {
+	if strings.TrimSpace(source.WebDAVURL) == "" {
+		return sourceExistsUnknown, nil
+	}
+	base, err := url.Parse(strings.TrimRight(source.WebDAVURL, "/") + "/")
+	if err != nil {
+		return sourceExistsUnknown, err
+	}
+	rel, err := url.Parse(path.Join(strings.Trim(sourcePath, "/")))
+	if err != nil {
+		return sourceExistsUnknown, err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, base.ResolveReference(rel).String(), nil)
+	if err != nil {
+		return sourceExistsUnknown, err
+	}
+	if source.User != "" || source.Password != "" {
+		req.SetBasicAuth(source.User, source.Password)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return sourceExistsUnknown, nil
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK, http.StatusNoContent, http.StatusPartialContent:
+		return sourceExistsYes, nil
+	case http.StatusNotFound, http.StatusGone:
+		return sourceExistsNo, nil
+	default:
+		return sourceExistsUnknown, nil
+	}
 }
 
 func ApplyFullSync(ctx context.Context, runner Runner, pool Pool, req FullSyncRequest) error {

@@ -2,6 +2,9 @@ package agent
 
 import (
 	"context"
+	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,11 +13,12 @@ import (
 
 type recordingRunner struct {
 	specs []CommandSpec
+	err   error
 }
 
 func (r *recordingRunner) Run(_ context.Context, spec CommandSpec) error {
 	r.specs = append(r.specs, spec)
-	return nil
+	return r.err
 }
 
 func containsArg(args []string, want string) bool {
@@ -176,6 +180,76 @@ func TestApplyEventBatchRunsCopyAndDelete(t *testing.T) {
 	}
 	if _, err := os.Stat(deleteTarget); !os.IsNotExist(err) {
 		t.Fatalf("delete target still exists")
+	}
+}
+
+func TestApplyEventBatchRemovesTargetWhenSourceAlreadyGone(t *testing.T) {
+	dir := t.TempDir()
+	pool := Pool{Name: "default", Path: dir}
+	if err := EnsurePool(pool, false); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "default", "demo", "save", "a.txt")
+	if err := writeFile(target, "old"); err != nil {
+		t.Fatal(err)
+	}
+	source := httptest.NewServer(http.NotFoundHandler())
+	defer source.Close()
+
+	runner := &recordingRunner{}
+	err := ApplyEventBatch(context.Background(), runner, pool, EventBatch{
+		Namespace: "default",
+		Volume:    "demo",
+		Source:    SourceRef{WebDAVURL: source.URL},
+		Events:    []FileEvent{{Path: "save/a.txt", Op: EventOpUpsert}},
+	})
+	if err != nil {
+		t.Fatalf("ApplyEventBatch returned error: %v", err)
+	}
+	if len(runner.specs) != 0 {
+		t.Fatalf("ran %d commands, want none", len(runner.specs))
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("target was not removed after missing source: %v", err)
+	}
+}
+
+func TestApplyEventBatchRemovesTargetWhenSourceDisappearsAfterCopyFailure(t *testing.T) {
+	dir := t.TempDir()
+	pool := Pool{Name: "default", Path: dir}
+	if err := EnsurePool(pool, false); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(dir, "default", "demo", "save", "a.txt")
+	if err := writeFile(target, "old"); err != nil {
+		t.Fatal(err)
+	}
+	var checks int
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		checks++
+		if checks == 1 {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer source.Close()
+
+	runner := &recordingRunner{err: errors.New("copy failed")}
+	err := ApplyEventBatch(context.Background(), runner, pool, EventBatch{
+		Namespace: "default",
+		Volume:    "demo",
+		Source:    SourceRef{WebDAVURL: source.URL},
+		Events:    []FileEvent{{Path: "save/a.txt", Op: EventOpUpsert}},
+	})
+	if err != nil {
+		t.Fatalf("ApplyEventBatch returned error: %v", err)
+	}
+	if len(runner.specs) != 1 {
+		t.Fatalf("ran %d commands, want 1", len(runner.specs))
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatalf("target was not removed after disappeared source: %v", err)
 	}
 }
 
