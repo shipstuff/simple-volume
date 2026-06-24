@@ -1,17 +1,16 @@
-# Simple Volume V0 Plan
+# Simple Volume Initial Release Plan
 
 ## Status
 
-V0 is complete for the initial `v0.1.0` release boundary. It is still under
-real-workload validation, but the first usable shape is stable: dynamic CSI
-volumes, local storage pools, watch-driven async replication, freshness-gated
-failover, active-node scheduling labels, and backup-before-restore for returning
-old active nodes.
+This plan has been implemented and validated for the `v0.2.0` initial usable
+release boundary: dynamic CSI volumes, local storage pools, shadow-backed
+watch-driven async replication, freshness-gated failover, active-node
+scheduling labels, and backup-before-restore for returning old active nodes.
 
-The v0 PV size is not enforced as a disk quota. Requested capacity is recorded
-for Kubernetes API shape, placement decisions, and operator visibility, similar
-to `local-path`; actual usage is bounded by the backing local pool unless the
-host filesystem enforces its own limits.
+PV size is not enforced as a disk quota. Requested capacity is recorded for
+Kubernetes API shape, placement decisions, and operator visibility, similar to
+`local-path`; actual usage is bounded by the backing local pool unless the host
+filesystem enforces its own limits.
 
 ## Summary
 
@@ -21,7 +20,8 @@ host filesystem enforces its own limits.
     lifecycle.
 
 - Byte replication runs outside CSI in a node-agent DaemonSet using existing tools like rsync/rclone.
-- No production Windrose/Enshrouded adoption in V0; ship disposable demo workloads first.
+- Real workload validation uses the Windrose canary before broader production
+  adoption.
 
 ## Public API And Kubernetes Model
 
@@ -46,7 +46,7 @@ host filesystem enforces its own limits.
       - agent scheduling via nodeSelector, affinity, and tolerations.
 
 - Eligible nodes default to healthy node-agent pods for the requested pool.
-- Per-volume node restrictions are optional and additive, via selectors or explicit constraints, not required for V0.
+- Per-volume node restrictions are optional and additive, via selectors or explicit constraints, not required for the initial release.
 - Workloads that consume `simple-volume` should declare compatible storage-pool
   or per-volume scheduling selectors/affinity in their own manifests. Admission
   webhook injection is not part of the default adoption model.
@@ -112,7 +112,8 @@ host filesystem enforces its own limits.
       - CSI refuses mounts on unauthorized nodes
       - pods reschedule naturally after node failure or eviction
 
-- Optional workloadRef can be added for V0 demos to delete/restart stuck pods and replace old hard hostname node selectors
+- Optional workloadRef can be added later for demos that need explicit
+  owner-level actions beyond stale bound pod deletion.
     with the stable active-label selector after promotion; production use can remain Kubernetes-eviction-driven until validated.
 
 ## Test Plan
@@ -150,13 +151,13 @@ host filesystem enforces its own limits.
 
 ## Assumptions
 
-- V0 is single-writer async replication only.
+- The initial release is single-writer async replication only.
 - No multi-writer semantics, no synchronous writes, and no live Postgres file replication.
 - CSI is a thin Kubernetes volume boundary, not the replication engine.
 - Node-agent DaemonSet placement defines the default storage-capable node set.
 - Production workload adoption requires a later explicit rollout plan, restore drill, and failure-mode test.
 
-## Post-v0 Failover Selection
+## Failover Selection Included In v0.2.0
 
 - Added `simple-volume.shipstuff.io/failover-node-priority` as a PVC annotation.
 - Keep storage pool membership defined by node-agent DaemonSet placement at

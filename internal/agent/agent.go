@@ -89,6 +89,41 @@ func EnsureVolumePath(v VolumePath, perm os.FileMode) (string, error) {
 	return path, nil
 }
 
+func ShadowSourceBasePath(namespace, volume string) string {
+	return filepath.ToSlash(filepath.Join(shadowRootDir, safeSegment(namespace), safeSegment(volume), shadowCurrentDir, shadowDataDir))
+}
+
+func ResolveShadowPath(pool Pool, namespace, volume string) (string, error) {
+	return resolvePoolRelativePath(pool, ShadowSourceBasePath(namespace, volume))
+}
+
+func EnsureShadowPath(pool Pool, namespace, volume string) (string, error) {
+	path, err := ResolveShadowPath(pool, namespace, volume)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		return "", err
+	}
+	return path, nil
+}
+
+func resolvePoolRelativePath(pool Pool, rel string) (string, error) {
+	cleanPool := pool.Clean()
+	if cleanPool.Path == "." || cleanPool.Path == string(filepath.Separator) || cleanPool.Path == "" {
+		return "", fmt.Errorf("invalid pool path %q", pool.Path)
+	}
+	rel = strings.Trim(strings.ReplaceAll(rel, "\\", "/"), "/")
+	if rel == "" {
+		return "", fmt.Errorf("relative path is required")
+	}
+	full := filepath.Clean(filepath.Join(cleanPool.Path, filepath.FromSlash(rel)))
+	if full != cleanPool.Path && !strings.HasPrefix(full, cleanPool.Path+string(filepath.Separator)) {
+		return "", ErrPathOutsidePool
+	}
+	return full, nil
+}
+
 func BackupVolumePath(v VolumePath, now time.Time) (string, error) {
 	path, err := ResolveVolumePath(v)
 	if err != nil {

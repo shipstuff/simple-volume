@@ -18,14 +18,16 @@ type TargetRef struct {
 }
 
 type WatchStartRequest struct {
-	Namespace    string          `json:"namespace,omitempty"`
-	Volume       string          `json:"volume"`
-	Source       SourceRef       `json:"source"`
-	Targets      []TargetRef     `json:"targets"`
-	IncludePaths []string        `json:"includePaths,omitempty"`
-	ExcludePaths []string        `json:"excludePaths,omitempty"`
-	Ownership    OwnershipPolicy `json:"ownership,omitempty"`
-	Debounce     string          `json:"debounce,omitempty"`
+	Namespace         string          `json:"namespace,omitempty"`
+	Volume            string          `json:"volume"`
+	Source            SourceRef       `json:"source"`
+	Targets           []TargetRef     `json:"targets"`
+	IncludePaths      []string        `json:"includePaths,omitempty"`
+	ExcludePaths      []string        `json:"excludePaths,omitempty"`
+	Ownership         OwnershipPolicy `json:"ownership,omitempty"`
+	Debounce          string          `json:"debounce,omitempty"`
+	ConsistencyMode   string          `json:"consistencyMode,omitempty"`
+	ConfirmedReplicas *int            `json:"confirmedReplicas,omitempty"`
 }
 
 type WatchStopRequest struct {
@@ -42,6 +44,8 @@ type WatchStatus struct {
 	IncludePaths         []string        `json:"includePaths,omitempty"`
 	ExcludePaths         []string        `json:"excludePaths,omitempty"`
 	Ownership            OwnershipPolicy `json:"ownership,omitempty"`
+	ConsistencyMode      string          `json:"consistencyMode,omitempty"`
+	ConfirmedReplicas    int             `json:"confirmedReplicas,omitempty"`
 	Running              bool            `json:"running"`
 	StartedAt            time.Time       `json:"startedAt"`
 	StoppedAt            *time.Time      `json:"stoppedAt,omitempty"`
@@ -108,6 +112,7 @@ func (s HTTPBatchSender) SendBatch(ctx context.Context, target TargetRef, batch 
 type WatchManager struct {
 	pool   Pool
 	sender BatchSender
+	runner Runner
 
 	mu      sync.Mutex
 	watches map[string]*managedWatch
@@ -119,12 +124,20 @@ type managedWatch struct {
 }
 
 func NewWatchManager(pool Pool, sender BatchSender) *WatchManager {
+	return NewWatchManagerWithRunner(pool, sender, ExecRunner{})
+}
+
+func NewWatchManagerWithRunner(pool Pool, sender BatchSender, runner Runner) *WatchManager {
 	if sender == nil {
 		sender = HTTPBatchSender{Client: &http.Client{Timeout: 10 * time.Minute}}
+	}
+	if runner == nil {
+		runner = ExecRunner{}
 	}
 	return &WatchManager{
 		pool:    pool,
 		sender:  sender,
+		runner:  runner,
 		watches: make(map[string]*managedWatch),
 	}
 }
@@ -148,20 +161,24 @@ func (m *WatchManager) Start(ctx context.Context, req WatchStartRequest) (WatchS
 	if err != nil {
 		return WatchStatus{}, fmt.Errorf("debounce: %w", err)
 	}
+	consistencyMode := normalizeConsistencyMode(req.ConsistencyMode)
+	confirmedReplicas := defaultConfirmedReplicas(req.ConfirmedReplicas, len(req.Targets))
 
 	key := watchKey(req.Namespace, req.Volume)
 	watchCtx, cancel := context.WithCancel(context.Background())
 	status := WatchStatus{
-		Namespace:      req.Namespace,
-		Volume:         req.Volume,
-		Source:         req.Source,
-		Targets:        append([]TargetRef(nil), req.Targets...),
-		TargetStatuses: initialTargetStatuses(req.Targets),
-		IncludePaths:   append([]string(nil), req.IncludePaths...),
-		ExcludePaths:   append([]string(nil), req.ExcludePaths...),
-		Ownership:      req.Ownership,
-		Running:        true,
-		StartedAt:      time.Now().UTC(),
+		Namespace:         req.Namespace,
+		Volume:            req.Volume,
+		Source:            req.Source,
+		Targets:           append([]TargetRef(nil), req.Targets...),
+		TargetStatuses:    initialTargetStatuses(req.Targets),
+		IncludePaths:      append([]string(nil), req.IncludePaths...),
+		ExcludePaths:      append([]string(nil), req.ExcludePaths...),
+		Ownership:         req.Ownership,
+		ConsistencyMode:   consistencyMode,
+		ConfirmedReplicas: confirmedReplicas,
+		Running:           true,
+		StartedAt:         time.Now().UTC(),
 	}
 
 	m.mu.Lock()
@@ -179,7 +196,7 @@ func (m *WatchManager) Start(ctx context.Context, req WatchStartRequest) (WatchS
 		IncludePaths: req.IncludePaths,
 		ExcludePaths: req.ExcludePaths,
 		Debounce:     debounce,
-	}, req.Source, append([]TargetRef(nil), req.Targets...), req.Ownership)
+	}, req.Source, append([]TargetRef(nil), req.Targets...), req.Ownership, consistencyMode, confirmedReplicas)
 
 	return status, nil
 }
@@ -293,15 +310,34 @@ func (m *WatchManager) StatusHandler(auth TokenAuthorizer) http.HandlerFunc {
 	}
 }
 
-func (m *WatchManager) run(ctx context.Context, key string, watch *managedWatch, cfg WatchConfig, source SourceRef, targets []TargetRef, ownership OwnershipPolicy) {
+func (m *WatchManager) run(ctx context.Context, key string, watch *managedWatch, cfg WatchConfig, source SourceRef, targets []TargetRef, ownership OwnershipPolicy, consistencyMode string, confirmedReplicas int) {
 	err := WatchVolume(ctx, cfg, func(ctx context.Context, batch EventBatch) error {
 		batch.Source = source
 		batch.Ownership = ownership
+		if consistencyMode == ConsistencyModeShadow {
+			shadowBatch, err := ApplyShadowEventBatch(ctx, m.runner, m.pool, batch, PathFilter{
+				IncludePaths: cfg.IncludePaths,
+				ExcludePaths: cfg.ExcludePaths,
+			})
+			if err != nil {
+				return err
+			}
+			batch = shadowBatch
+		}
+		successes := make([]TargetRef, 0, len(targets))
 		for _, target := range targets {
 			if err := m.sender.SendBatch(ctx, target, batch); err != nil {
 				m.recordDeliveryError(key, watch, target, err)
 				continue
 			}
+			successes = append(successes, target)
+		}
+		required := confirmationThreshold(confirmedReplicas, len(targets))
+		if len(successes) < required {
+			m.recordUnconfirmedDelivery(key, watch, batch, len(successes), required)
+			return nil
+		}
+		for _, target := range successes {
 			m.recordDeliverySuccess(key, watch, target, batch)
 		}
 		return nil
@@ -343,6 +379,18 @@ func (m *WatchManager) recordDeliveryError(key string, watch *managedWatch, targ
 	targetStatus.LastError = err.Error()
 }
 
+func (m *WatchManager) recordUnconfirmedDelivery(key string, watch *managedWatch, batch EventBatch, got, want int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.watches[key] != watch {
+		return
+	}
+	watch.status.LastBatchAt = nil
+	watch.status.LastBatchEventCount = len(batch.Events)
+	watch.status.LastBatchGeneration = batch.Generation
+	watch.status.LastDeliveryError = fmt.Sprintf("generation %s only confirmed on %d/%d required replicas", batch.Generation, got, want)
+}
+
 func (m *WatchManager) recordStopped(key string, watch *managedWatch, err error) {
 	now := time.Now().UTC()
 	m.mu.Lock()
@@ -371,6 +419,34 @@ func parseOptionalDuration(value string, fallback time.Duration) (time.Duration,
 		return 0, err
 	}
 	return duration, nil
+}
+
+func normalizeConsistencyMode(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", ConsistencyModeShadow:
+		return ConsistencyModeShadow
+	case ConsistencyModeLive:
+		return ConsistencyModeLive
+	default:
+		return ConsistencyModeShadow
+	}
+}
+
+func defaultConfirmedReplicas(value *int, targets int) int {
+	if value == nil {
+		return confirmationThreshold(1, targets)
+	}
+	return confirmationThreshold(*value, targets)
+}
+
+func confirmationThreshold(value, targets int) int {
+	if value <= 0 {
+		return 0
+	}
+	if targets > 0 && value > targets {
+		return targets
+	}
+	return value
 }
 
 func cloneWatchStatus(status WatchStatus) WatchStatus {

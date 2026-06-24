@@ -1,6 +1,6 @@
 image:
   repository: ghcr.io/shipstuff/simple-volume
-  tag: "0.1.0"
+  tag: "0.2.0"
   pullPolicy: IfNotPresent
 
 namespaceOverride: ""
@@ -17,6 +17,7 @@ controller:
   replicationController:
     enabled: true
     reconcileInterval: 30s
+    failoverTimeout: 10s
 
 node:
   resources: {}
@@ -26,7 +27,7 @@ node:
         cpu: 10m
         memory: 64Mi
       limits:
-        memory: 1Gi
+        memory: 256Mi
   csiNode:
     resources:
       requests:

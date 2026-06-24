@@ -1,7 +1,7 @@
 # Failover Selection Tasks
 
-This tracks the post-`v0.1.0` failover selection work discussed after the
-initial release tag.
+This tracks failover selection work included in the `v0.2.0` initial usable
+release.
 
 ## Implemented
 
@@ -20,6 +20,10 @@ initial release tag.
   requests and node allocatable capacity.
 - Keep PV/PVC annotations as the status source of truth and keep CSI as the
   final mount authorization guard.
+- Do not delete unbound Pending consumer pods during failover. After promotion,
+  a Pending pod can be scheduled naturally once the active node label moves.
+  Only delete/evict consumer pods that are already bound to a non-promoted node
+  and need fencing or owner-controller recreation.
 
 ## Still Future
 

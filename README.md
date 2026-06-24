@@ -1,6 +1,6 @@
 # simple-volume
 
-`simple-volume` is a Kubernetes-native async replicated local-volume prototype.
+`simple-volume` is a Kubernetes-native async replicated local-volume system.
 Applications use normal PVCs backed by the `simple-volume.shipstuff.io` CSI
 driver. The controller and node agents handle the local replica lifecycle,
 freshness policy, and promotion state.
@@ -26,9 +26,10 @@ acceptable fit for many single-writer workloads.
 See [docs/why-simple-volume.md](docs/why-simple-volume.md) for the full design
 rationale, replication model, and storage options we evaluated.
 
-## V0 Scope
+## Initial Release Scope
 
-The V0 scope is intentionally narrow and complete enough for initial release:
+The `v0.2.0` release is intentionally narrow and ready for initial real
+workload use with understood async-replication tradeoffs:
 
 - dynamic PVC provisioning into logical SimpleVolumes
 - chart-configured local storage pools
@@ -40,29 +41,47 @@ The V0 scope is intentionally narrow and complete enough for initial release:
 
 Replication logic does not run inside CSI. CSI is the Kubernetes mount boundary;
 the controller owns policy and the node agent owns local filesystem operations.
-Like `local-path`, v0 does not enforce PV capacity at the filesystem layer. The
-PVC request is used for Kubernetes API shape, placement decisions, and operator
-visibility; workloads can still consume available space in the backing local
-pool unless the host filesystem enforces its own limits.
+Like `local-path`, `simple-volume` does not enforce PV capacity at the
+filesystem layer. The PVC request is used for Kubernetes API shape, placement
+decisions, and operator visibility; workloads can still consume available space
+in the backing local pool unless the host filesystem enforces its own limits.
 
 ## Replication Model
 
-The intended V0 replication path is watch-driven:
+The intended replication path is watch-driven and, by default, shadow-backed:
 
 - the active node-agent watches configured durable paths inside the active
   volume
 - file events are debounced into batches
-- replica agents receive batch sync requests
-- replica agents pull changed files from the active agent's read-only rclone
-  WebDAV endpoint
+- in `shadow` consistency mode, the source agent first stages those changes into
+  a local shadow tree
+- replica agents receive batch sync requests and pull from the completed shadow
+  tree through the active agent's read-only rclone WebDAV endpoint
 - the WebDAV server uses a short directory cache so newly written files are
   visible to watch-triggered pulls
+- a generation is considered successfully delivered only after the configured
+  number of replicas confirms it
 - an off-hours full resync schedule, such as `0 4 * * *`, provides a safety net
   for missed events or agent restarts
 
 Volumes can replicate only selected folders/files. For game servers, this keeps
 large reconstructable game downloads out of the hot replication path while still
 protecting save/config state.
+
+The default chart resources are sized for a low-memory steady state. The node
+agent uses conservative rclone settings for replication work: single-transfer
+copying, one checker, no explicit transfer buffer, and no multi-threaded stream
+copying. That keeps memory predictable on small clusters, including Pi-class
+nodes, but it also means large initial seeds can be slow. Operators that want
+faster whole-volume seeding should raise the agent memory limit and the rclone
+concurrency/buffer settings together once those knobs are exposed. Raising
+memory alone only increases headroom; it does not make a single-transfer sync
+faster.
+
+Treat 1:1 full-volume seeding as an operational bootstrap path, not the normal
+replication profile. It walks many more files, includes reconstructable game
+runtime data, and can consume noticeably more accounted memory from kernel page
+cache and rclone directory/check state than scoped steady-state replication.
 
 The operator chooses the storage-capable node set when installing the chart by
 scheduling the node-agent DaemonSet with normal Kubernetes selectors, affinity,
@@ -71,7 +90,7 @@ declare matching scheduling intent in their own manifests. `simple-volume` owns
 the per-volume active/fresh labels, but it should not depend on a mutating
 admission webhook to make unrelated workload charts schedulable.
 
-The node agent exposes the V0 watch control surface used by the controller and
+The node agent exposes the watch control surface used by the controller and
 manual E2E validation:
 
 - `POST /replication/watch/start` starts or replaces an active watch for a
@@ -104,7 +123,7 @@ Example start request:
 }
 ```
 
-The controller reconciles this same behavior for annotated PVCs. For V0 it
+The controller reconciles this same behavior for annotated PVCs. It
 discovers the active/source node from the running pod that mounts the claim,
 uses all other ready node-agent pods as replicas, starts the source watch, and
 optionally runs a scoped full sync against each replica.
@@ -115,15 +134,33 @@ metadata:
     simple-volume.shipstuff.io/replication-enabled: "true"
     simple-volume.shipstuff.io/replication-include-paths: "writes.log,saves/**"
     simple-volume.shipstuff.io/replication-exclude-paths: "downloads/**"
+    simple-volume.shipstuff.io/replication-prune-excluded: "false"
     simple-volume.shipstuff.io/replication-debounce: "2s"
+    simple-volume.shipstuff.io/replication-consistency-mode: "shadow"
+    simple-volume.shipstuff.io/replication-confirmed-replicas: "1"
     simple-volume.shipstuff.io/replication-full-sync-on-start: "true"
     simple-volume.shipstuff.io/replication-full-sync-schedule: "0 4 * * *"
 ```
 
+`shadow` is the safe default for DB-like file trees because replicas pull from a
+source-side staged copy instead of the live directory while the app is mutating
+it. Workloads that do not need this can opt out with
+`replication-consistency-mode: "live"`. Shadow mode writes an additional local
+copy of the included paths on the active node, so narrow include paths are the
+main mitigation for disk growth and SSD wear.
+
+Excluded paths are preserved on replicas by default. This is important for
+large reconstructable caches such as Steam game installs: they can be excluded
+from replication without being deleted during a full sync. Set
+`simple-volume.shipstuff.io/replication-prune-excluded: "true"` only when the
+replica must be an exact filtered mirror and deleting excluded files is
+acceptable.
+
 Replication uses rclone metadata preservation and the controller infers replica
 file ownership from the active pod's `runAsUser`, `runAsGroup`, or `fsGroup`
 when available. PVC annotations can override this for workloads without a pod
-security context:
+security context. File-mode overrides preserve existing executable bits so
+launch scripts and runtimes are not made non-executable by normalization:
 
 ```yaml
 metadata:
@@ -138,7 +175,7 @@ The current schedule parser intentionally supports exact minute/hour cron
 windows such as `0 4 * * *`; ranges and step expressions are left for the
 controller-runtime implementation.
 
-Opt-in V0 failover is PVC annotation driven:
+Opt-in automatic failover is PVC annotation driven:
 
 ```yaml
 metadata:

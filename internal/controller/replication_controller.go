@@ -28,9 +28,13 @@ const (
 	AnnotationReplicationEnabled  = LabelPrefix + "/replication-enabled"
 	AnnotationIncludePaths        = LabelPrefix + "/replication-include-paths"
 	AnnotationExcludePaths        = LabelPrefix + "/replication-exclude-paths"
+	AnnotationPruneExcluded       = LabelPrefix + "/replication-prune-excluded"
 	AnnotationDebounce            = LabelPrefix + "/replication-debounce"
 	AnnotationFullSyncOnStart     = LabelPrefix + "/replication-full-sync-on-start"
 	AnnotationFullSyncSchedule    = LabelPrefix + "/replication-full-sync-schedule"
+	AnnotationRequiredPaths       = LabelPrefix + "/replication-required-paths"
+	AnnotationConsistencyMode     = LabelPrefix + "/replication-consistency-mode"
+	AnnotationConfirmedReplicas   = LabelPrefix + "/replication-confirmed-replicas"
 	AnnotationReplicationOwnerUID = LabelPrefix + "/replication-owner-uid"
 	AnnotationReplicationOwnerGID = LabelPrefix + "/replication-owner-gid"
 	AnnotationReplicationFileMode = LabelPrefix + "/replication-file-mode"
@@ -43,6 +47,7 @@ type ReplicationControllerConfig struct {
 	TokenSecretName    string
 	TokenSecretKey     string
 	ReconcileInterval  time.Duration
+	FailoverTimeout    time.Duration
 	HTTPTimeout        time.Duration
 	AgentLabelSelector string
 }
@@ -58,6 +63,8 @@ type ReplicationController struct {
 	completedSyncs  map[string]bool
 	runningSyncs    map[string]bool
 	lastScheduledOn map[string]string
+	lastActiveNode  map[string]string
+	activeEpoch     map[string]int64
 }
 
 type DesiredTarget struct {
@@ -66,18 +73,22 @@ type DesiredTarget struct {
 }
 
 type DesiredReplication struct {
-	Namespace    string
-	ClaimName    string
-	Volume       string
-	ActiveNode   string
-	SourceURL    string
-	Targets      []DesiredTarget
-	IncludePaths []string
-	ExcludePaths []string
-	Ownership    agent.OwnershipPolicy
-	Debounce     string
-	FullSync     bool
-	FullSchedule string
+	Namespace         string
+	ClaimName         string
+	Volume            string
+	ActiveNode        string
+	SourceURL         string
+	Targets           []DesiredTarget
+	IncludePaths      []string
+	ExcludePaths      []string
+	PruneExcluded     bool
+	RequiredPaths     []string
+	Ownership         agent.OwnershipPolicy
+	Debounce          string
+	FullSync          bool
+	FullSchedule      string
+	ConsistencyMode   string
+	ConfirmedReplicas int
 }
 
 func NewReplicationController(client kubernetes.Interface, cfg ReplicationControllerConfig) *ReplicationController {
@@ -96,6 +107,9 @@ func NewReplicationController(client kubernetes.Interface, cfg ReplicationContro
 	if cfg.ReconcileInterval <= 0 {
 		cfg.ReconcileInterval = 30 * time.Second
 	}
+	if cfg.FailoverTimeout <= 0 {
+		cfg.FailoverTimeout = 10 * time.Second
+	}
 	if cfg.HTTPTimeout <= 0 {
 		cfg.HTTPTimeout = time.Hour
 	}
@@ -110,6 +124,8 @@ func NewReplicationController(client kubernetes.Interface, cfg ReplicationContro
 		completedSyncs:  make(map[string]bool),
 		runningSyncs:    make(map[string]bool),
 		lastScheduledOn: make(map[string]string),
+		lastActiveNode:  make(map[string]string),
+		activeEpoch:     make(map[string]int64),
 	}
 	controller.failover = NewFailoverController(client, cfg)
 	return controller
@@ -148,7 +164,10 @@ func (c *ReplicationController) Run(ctx context.Context) error {
 func (c *ReplicationController) Reconcile(ctx context.Context) error {
 	now := time.Now()
 	if c.failover != nil {
-		if err := c.failover.Reconcile(ctx, now); err != nil {
+		failoverCtx, cancel := context.WithTimeout(ctx, c.cfg.FailoverTimeout)
+		err := c.failover.Reconcile(failoverCtx, now)
+		cancel()
+		if err != nil {
 			log.Printf("failover reconcile failed: %v", err)
 		}
 	}
@@ -159,6 +178,9 @@ func (c *ReplicationController) Reconcile(ctx context.Context) error {
 	desired, err := c.DesiredReplications(ctx, token)
 	if err != nil {
 		return err
+	}
+	if len(desired) > 0 {
+		log.Printf("replication reconcile desired=%d", len(desired))
 	}
 	for _, item := range desired {
 		if err := c.reconcileOne(ctx, item, token, now); err != nil {
@@ -229,18 +251,22 @@ func (c *ReplicationController) DesiredReplications(ctx context.Context, token s
 			continue
 		}
 		out = append(out, DesiredReplication{
-			Namespace:    pvc.Namespace,
-			ClaimName:    pvc.Name,
-			Volume:       pvc.Spec.VolumeName,
-			ActiveNode:   activeNode,
-			SourceURL:    agentWebDAVURL(source.Status.PodIP),
-			Targets:      targets,
-			IncludePaths: csvAnnotation(pvc.Annotations[AnnotationIncludePaths]),
-			ExcludePaths: csvAnnotation(pvc.Annotations[AnnotationExcludePaths]),
-			Ownership:    ownership,
-			Debounce:     strings.TrimSpace(pvc.Annotations[AnnotationDebounce]),
-			FullSync:     truthy(pvc.Annotations[AnnotationFullSyncOnStart]),
-			FullSchedule: strings.TrimSpace(pvc.Annotations[AnnotationFullSyncSchedule]),
+			Namespace:         pvc.Namespace,
+			ClaimName:         pvc.Name,
+			Volume:            pvc.Spec.VolumeName,
+			ActiveNode:        activeNode,
+			SourceURL:         agentWebDAVURL(source.Status.PodIP),
+			Targets:           targets,
+			IncludePaths:      csvAnnotation(pvc.Annotations[AnnotationIncludePaths]),
+			ExcludePaths:      csvAnnotation(pvc.Annotations[AnnotationExcludePaths]),
+			PruneExcluded:     truthy(pvc.Annotations[AnnotationPruneExcluded]),
+			RequiredPaths:     csvAnnotation(pvc.Annotations[AnnotationRequiredPaths]),
+			Ownership:         ownership,
+			Debounce:          strings.TrimSpace(pvc.Annotations[AnnotationDebounce]),
+			FullSync:          truthy(pvc.Annotations[AnnotationFullSyncOnStart]),
+			FullSchedule:      strings.TrimSpace(pvc.Annotations[AnnotationFullSyncSchedule]),
+			ConsistencyMode:   replicationConsistencyMode(pvc.Annotations),
+			ConfirmedReplicas: confirmedReplicas(pvc.Annotations),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -254,7 +280,8 @@ func (c *ReplicationController) DesiredReplications(ctx context.Context, token s
 
 func (c *ReplicationController) reconcileOne(ctx context.Context, desired DesiredReplication, token string, now time.Time) error {
 	key := desired.Namespace + "/" + desired.Volume
-	signature := desired.signature()
+	epoch := c.noteActiveNode(key, desired.ActiveNode)
+	signature := fmt.Sprintf("epoch=%d:%s", epoch, desired.signature())
 	if desired.FullSync {
 		syncKey := key + ":" + signature
 		c.mu.Lock()
@@ -262,13 +289,21 @@ func (c *ReplicationController) reconcileOne(ctx context.Context, desired Desire
 		c.mu.Unlock()
 		if !done {
 			if c.tryStartFullSync(syncKey) {
+				c.stopReplicaWatches(ctx, desired, token)
+				log.Printf("starting startup full sync namespace=%s claim=%s volume=%s activeNode=%s targets=%d consistency=%s confirmedReplicas=%d",
+					desired.Namespace, desired.ClaimName, desired.Volume, desired.ActiveNode, len(desired.Targets), desired.ConsistencyMode, desired.ConfirmedReplicas)
 				go c.runFullSync(ctx, syncKey, desired, token, now, func() {
+					if !c.isCurrentActiveEpoch(key, desired.ActiveNode, epoch) {
+						log.Printf("discarded startup full sync for stale active epoch namespace=%s claim=%s volume=%s activeNode=%s",
+							desired.Namespace, desired.ClaimName, desired.Volume, desired.ActiveNode)
+						return
+					}
 					c.mu.Lock()
 					c.completedSyncs[syncKey] = true
 					c.mu.Unlock()
 					log.Printf("completed startup full sync namespace=%s claim=%s volume=%s targets=%d",
 						desired.Namespace, desired.ClaimName, desired.Volume, len(desired.Targets))
-					if err := c.ensureWatchStarted(ctx, desired, token, signature); err != nil {
+					if err := c.startWatchAndRemember(ctx, desired, token, signature); err != nil {
 						log.Printf("start replication watch after full sync namespace=%s claim=%s volume=%s: %v",
 							desired.Namespace, desired.ClaimName, desired.Volume, err)
 					}
@@ -290,6 +325,8 @@ func (c *ReplicationController) reconcileOne(ctx context.Context, desired Desire
 		c.mu.Unlock()
 		syncKey := scheduleKey + ":" + today
 		if last != today && c.tryStartFullSync(syncKey) {
+			log.Printf("starting scheduled full sync namespace=%s claim=%s volume=%s activeNode=%s schedule=%q targets=%d consistency=%s confirmedReplicas=%d",
+				desired.Namespace, desired.ClaimName, desired.Volume, desired.ActiveNode, desired.FullSchedule, len(desired.Targets), desired.ConsistencyMode, desired.ConfirmedReplicas)
 			go c.runFullSync(ctx, syncKey, desired, token, now, func() {
 				c.mu.Lock()
 				c.lastScheduledOn[scheduleKey] = today
@@ -300,6 +337,30 @@ func (c *ReplicationController) reconcileOne(ctx context.Context, desired Desire
 		}
 	}
 	return nil
+}
+
+func (c *ReplicationController) noteActiveNode(key, activeNode string) int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	previous := c.lastActiveNode[key]
+	if previous != "" && previous != activeNode {
+		c.activeEpoch[key]++
+		delete(c.startedWatches, key)
+		prefix := key + ":"
+		for syncKey := range c.completedSyncs {
+			if strings.HasPrefix(syncKey, prefix) {
+				delete(c.completedSyncs, syncKey)
+			}
+		}
+	}
+	c.lastActiveNode[key] = activeNode
+	return c.activeEpoch[key]
+}
+
+func (c *ReplicationController) isCurrentActiveEpoch(key, activeNode string, epoch int64) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lastActiveNode[key] == activeNode && c.activeEpoch[key] == epoch
 }
 
 func (c *ReplicationController) ensureWatchStarted(ctx context.Context, desired DesiredReplication, token, signature string) error {
@@ -319,16 +380,32 @@ func (c *ReplicationController) ensureWatchStarted(ctx context.Context, desired 
 		}
 	}
 	if !alreadyStarted {
-		if err := c.startWatch(ctx, desired, token); err != nil {
-			return err
-		}
-		c.mu.Lock()
-		c.startedWatches[key] = signature
-		c.mu.Unlock()
-		log.Printf("started replication watch namespace=%s claim=%s volume=%s activeNode=%s targets=%d",
-			desired.Namespace, desired.ClaimName, desired.Volume, desired.ActiveNode, len(desired.Targets))
+		c.stopReplicaWatches(ctx, desired, token)
+		return c.startWatchAndRemember(ctx, desired, token, signature)
 	}
 	return nil
+}
+
+func (c *ReplicationController) startWatchAndRemember(ctx context.Context, desired DesiredReplication, token, signature string) error {
+	if err := c.startWatch(ctx, desired, token); err != nil {
+		return err
+	}
+	key := desired.Namespace + "/" + desired.Volume
+	c.mu.Lock()
+	c.startedWatches[key] = signature
+	c.mu.Unlock()
+	log.Printf("started replication watch namespace=%s claim=%s volume=%s activeNode=%s targets=%d",
+		desired.Namespace, desired.ClaimName, desired.Volume, desired.ActiveNode, len(desired.Targets))
+	return nil
+}
+
+func (c *ReplicationController) stopReplicaWatches(ctx context.Context, desired DesiredReplication, token string) {
+	for _, target := range desired.Targets {
+		if err := c.stopWatch(ctx, target.Ref.URL, token, desired.Namespace, desired.Volume); err != nil {
+			log.Printf("stop stale replica watch namespace=%s claim=%s volume=%s node=%s: %v",
+				desired.Namespace, desired.ClaimName, desired.Volume, target.Node, err)
+		}
+	}
 }
 
 func (c *ReplicationController) tryStartFullSync(syncKey string) bool {
@@ -356,16 +433,50 @@ func (c *ReplicationController) runFullSync(ctx context.Context, syncKey string,
 
 func (c *ReplicationController) startWatch(ctx context.Context, desired DesiredReplication, token string) error {
 	req := agent.WatchStartRequest{
-		Namespace:    desired.Namespace,
-		Volume:       desired.Volume,
-		Source:       agent.SourceRef{WebDAVURL: desired.SourceURL},
-		Targets:      targetRefs(desired.Targets),
-		IncludePaths: desired.IncludePaths,
-		ExcludePaths: desired.ExcludePaths,
-		Ownership:    desired.Ownership,
-		Debounce:     desired.Debounce,
+		Namespace:         desired.Namespace,
+		Volume:            desired.Volume,
+		Source:            agent.SourceRef{WebDAVURL: desired.SourceURL},
+		Targets:           targetRefs(desired.Targets),
+		IncludePaths:      desired.IncludePaths,
+		ExcludePaths:      desired.ExcludePaths,
+		Ownership:         desired.Ownership,
+		Debounce:          desired.Debounce,
+		ConsistencyMode:   desired.ConsistencyMode,
+		ConfirmedReplicas: intPtr(desired.ConfirmedReplicas),
 	}
 	return c.postJSON(ctx, strings.TrimRight(agentHTTPURLFromWebDAV(desired.SourceURL), "/")+"/replication/watch/start", token, req)
+}
+
+func (c *ReplicationController) stopWatch(ctx context.Context, agentURL, token, namespace, volume string) error {
+	reqBody := agent.WatchStopRequest{
+		Namespace: namespace,
+		Volume:    volume,
+	}
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(agentURL, "/")+"/replication/watch/stop", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("%s returned %s: %s", req.URL.String(), resp.Status, strings.TrimSpace(string(responseBody)))
+	}
+	return nil
 }
 
 func (c *ReplicationController) watchStatus(ctx context.Context, desired DesiredReplication, token string) (agent.WatchStatus, error) {
@@ -397,14 +508,26 @@ func (c *ReplicationController) watchStatus(ctx context.Context, desired Desired
 
 func (c *ReplicationController) fullSyncTargets(ctx context.Context, desired DesiredReplication, token string, _ time.Time) error {
 	var errs []string
+	sourceBasePath := ""
+	if desired.ConsistencyMode == agent.ConsistencyModeShadow {
+		resp, err := c.prepareShadow(ctx, desired, token)
+		if err != nil {
+			return err
+		}
+		sourceBasePath = resp.SourceBasePath
+	}
+	successes := 0
 	for _, target := range desired.Targets {
 		backupExisting := c.failover.ShouldBackupBeforeRestore(desired.Namespace, desired.Volume, target.Node)
 		req := agent.FullSyncRequest{
 			Namespace:      desired.Namespace,
 			Volume:         desired.Volume,
 			Source:         agent.SourceRef{WebDAVURL: desired.SourceURL},
+			SourceBasePath: sourceBasePath,
 			IncludePaths:   desired.IncludePaths,
 			ExcludePaths:   desired.ExcludePaths,
+			PruneExcluded:  desired.PruneExcluded,
+			RequiredPaths:  desired.RequiredPaths,
 			Ownership:      desired.Ownership,
 			BackupExisting: backupExisting,
 		}
@@ -412,18 +535,48 @@ func (c *ReplicationController) fullSyncTargets(ctx context.Context, desired Des
 			errs = append(errs, err.Error())
 			continue
 		}
+		successes++
 		c.failover.RecordReplicaFreshness(desired.Namespace, desired.Volume, target.Node, time.Now(), true)
 		if backupExisting {
 			c.failover.MarkRestored(desired.Namespace, desired.Volume, target.Node)
 		}
 	}
-	if len(errs) > 0 {
+	required := confirmationThreshold(desired.ConfirmedReplicas, len(desired.Targets))
+	if successes < required {
 		return fmt.Errorf("full sync failed: %s", strings.Join(errs, "; "))
+	}
+	if len(errs) > 0 {
+		log.Printf("full sync namespace=%s claim=%s volume=%s confirmed %d/%d replicas; ignored errors: %s",
+			desired.Namespace, desired.ClaimName, desired.Volume, successes, required, strings.Join(errs, "; "))
 	}
 	return nil
 }
 
+func (c *ReplicationController) prepareShadow(ctx context.Context, desired DesiredReplication, token string) (agent.ShadowPrepareResponse, error) {
+	req := agent.ShadowPrepareRequest{
+		Namespace:     desired.Namespace,
+		Volume:        desired.Volume,
+		IncludePaths:  desired.IncludePaths,
+		ExcludePaths:  desired.ExcludePaths,
+		PruneExcluded: desired.PruneExcluded,
+		RequiredPaths: desired.RequiredPaths,
+	}
+	var out agent.ShadowPrepareResponse
+	err := c.postJSONDecode(ctx, strings.TrimRight(agentHTTPURLFromWebDAV(desired.SourceURL), "/")+"/replication/shadow/prepare", token, req, &out)
+	if err != nil {
+		return agent.ShadowPrepareResponse{}, err
+	}
+	if strings.TrimSpace(out.SourceBasePath) == "" {
+		return agent.ShadowPrepareResponse{}, fmt.Errorf("shadow prepare returned empty sourceBasePath")
+	}
+	return out, nil
+}
+
 func (c *ReplicationController) postJSON(ctx context.Context, url, token string, payload any) error {
+	return c.postJSONDecode(ctx, url, token, payload, nil)
+}
+
+func (c *ReplicationController) postJSONDecode(ctx context.Context, url, token string, payload any, out any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return err
@@ -442,6 +595,11 @@ func (c *ReplicationController) postJSON(ctx context.Context, url, token string,
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		responseBody, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return fmt.Errorf("%s returned %s: %s", url, resp.Status, strings.TrimSpace(string(responseBody)))
+	}
+	if out != nil {
+		if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -541,6 +699,45 @@ func truthy(value string) bool {
 	}
 }
 
+func replicationConsistencyMode(annotations map[string]string) string {
+	if annotations == nil {
+		return agent.ConsistencyModeShadow
+	}
+	switch strings.ToLower(strings.TrimSpace(annotations[AnnotationConsistencyMode])) {
+	case "", agent.ConsistencyModeShadow:
+		return agent.ConsistencyModeShadow
+	case agent.ConsistencyModeLive:
+		return agent.ConsistencyModeLive
+	default:
+		return agent.ConsistencyModeShadow
+	}
+}
+
+func confirmedReplicas(annotations map[string]string) int {
+	if annotations == nil {
+		return 1
+	}
+	value := strings.TrimSpace(annotations[AnnotationConfirmedReplicas])
+	if value == "" {
+		return 1
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < 0 {
+		return 1
+	}
+	return parsed
+}
+
+func confirmationThreshold(value, targets int) int {
+	if value <= 0 {
+		return 0
+	}
+	if targets > 0 && value > targets {
+		return targets
+	}
+	return value
+}
+
 func agentHTTPURL(ip string) string {
 	return "http://" + ip + ":8080"
 }
@@ -570,9 +767,15 @@ func (d DesiredReplication) signature() string {
 	b.WriteString("|")
 	b.WriteString(strings.Join(d.ExcludePaths, ","))
 	b.WriteString("|")
+	b.WriteString(strconv.FormatBool(d.PruneExcluded))
+	b.WriteString("|")
 	b.WriteString(ownershipSignature(d.Ownership))
 	b.WriteString("|")
 	b.WriteString(d.Debounce)
+	b.WriteString("|")
+	b.WriteString(d.ConsistencyMode)
+	b.WriteString("|")
+	b.WriteString(strconv.Itoa(d.ConfirmedReplicas))
 	return b.String()
 }
 
@@ -782,5 +985,9 @@ func optionalModeString(value *uint32) string {
 }
 
 func int64Ptr(value int64) *int64 {
+	return &value
+}
+
+func intPtr(value int) *int {
 	return &value
 }

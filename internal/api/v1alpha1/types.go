@@ -6,7 +6,8 @@ const (
 	Group   = "storage.shipstuff.io"
 	Version = "v1alpha1"
 
-	DriverName = "simple-volume.shipstuff.io"
+	DriverName    = "simple-volume.shipstuff.io"
+	DriverVersion = "0.2.0"
 )
 
 type VolumePhase string
@@ -62,6 +63,7 @@ type SyncSpec struct {
 	Mode               SyncMode      `json:"mode,omitempty"`
 	IncludePaths       []string      `json:"includePaths,omitempty"`
 	ExcludePaths       []string      `json:"excludePaths,omitempty"`
+	PruneExcluded      bool          `json:"pruneExcluded,omitempty"`
 	Debounce           time.Duration `json:"debounce,omitempty"`
 	FullResyncSchedule string        `json:"fullResyncSchedule,omitempty"`
 }

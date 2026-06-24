@@ -33,6 +33,7 @@ spec:
             - --sync-token-secret-name={{ .Values.sync.tokenSecretName }}
             - --sync-token-secret-key={{ .Values.sync.tokenSecretKey }}
             - --reconcile-interval={{ .Values.controller.replicationController.reconcileInterval }}
+            - --failover-timeout={{ .Values.controller.replicationController.failoverTimeout }}
           env:
             - name: POD_NAMESPACE
               valueFrom:

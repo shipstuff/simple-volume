@@ -88,7 +88,7 @@ func RunServer(ctx context.Context, cfg ServerConfig) error {
 func (s *Server) GetPluginInfo(context.Context, *csipb.GetPluginInfoRequest) (*csipb.GetPluginInfoResponse, error) {
 	return &csipb.GetPluginInfoResponse{
 		Name:          v1alpha1.DriverName,
-		VendorVersion: "0.1.0",
+		VendorVersion: v1alpha1.DriverVersion,
 	}, nil
 }
 

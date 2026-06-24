@@ -36,14 +36,14 @@ fi
 sed -i -E "s|^(version: )[0-9]+\\.[0-9]+\\.[0-9]+|\\1${NEW}|" helm/simple-volume/Chart.yaml
 sed -i -E "s|^(appVersion: \")[0-9]+\\.[0-9]+\\.[0-9]+(\")|\\1${NEW}\\2|" helm/simple-volume/Chart.yaml
 sed -i -E "s|^(  tag: \")[0-9]+\\.[0-9]+\\.[0-9]+(\")|\\1${NEW}\\2|" helm/simple-volume/values.yaml
+sed -i -E "s|^(\\s*DriverVersion = \")[0-9]+\\.[0-9]+\\.[0-9]+(\")|\\1${NEW}\\2|" internal/api/v1alpha1/types.go
 
 go test ./...
 helm lint ./helm/simple-volume
 helm template simple-volume ./helm/simple-volume >/dev/null
 
-git add helm/simple-volume/Chart.yaml helm/simple-volume/values.yaml
+git add helm/simple-volume/Chart.yaml helm/simple-volume/values.yaml internal/api/v1alpha1/types.go
 git commit -m "release: pin to v${NEW}"
 git tag -a "v${NEW}" -m "${TAG_MSG}"
 
 echo "ready to publish v${NEW}: git push --follow-tags origin main"
-

@@ -101,3 +101,54 @@ func TestWatchVolumeEmitsForDeepIncludeCreatedAfterStart(t *testing.T) {
 		t.Fatal("timed out waiting for batch")
 	}
 }
+
+func TestWatchedSnapshotDiffDetectsCreateUpdateDelete(t *testing.T) {
+	dir := t.TempDir()
+	root := filepath.Join(dir, "default", "demo")
+	saveDir := filepath.Join(root, "save")
+	if err := os.MkdirAll(saveDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldFile := filepath.Join(saveDir, "old.txt")
+	changedFile := filepath.Join(saveDir, "changed.txt")
+	if err := os.WriteFile(oldFile, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(changedFile, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	filter := PathFilter{IncludePaths: []string{"save/**"}}
+	before, err := snapshotWatchedFiles(root, filter)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.Remove(oldFile); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(changedFile, []byte("new content"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(saveDir, "new.txt"), []byte("new"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	after, err := snapshotWatchedFiles(root, filter)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	events := diffWatchedSnapshots(before, after)
+	want := []FileEvent{
+		{Path: "save/changed.txt", Op: EventOpUpsert},
+		{Path: "save/new.txt", Op: EventOpUpsert},
+		{Path: "save/old.txt", Op: EventOpDelete},
+	}
+	if len(events) != len(want) {
+		t.Fatalf("events = %#v, want %#v", events, want)
+	}
+	for i := range want {
+		if events[i] != want[i] {
+			t.Fatalf("events[%d] = %#v, want %#v; all=%#v", i, events[i], want[i], events)
+		}
+	}
+}

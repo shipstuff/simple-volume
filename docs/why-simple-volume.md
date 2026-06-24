@@ -17,11 +17,11 @@ policy, and node agents own local filesystem work and rclone-based replication.
 
 ## Replication Model
 
-For v0, a volume has one active node and zero or more replica nodes. The active
-node serves the mounted PVC and watches configured durable paths. Replica agents
-receive batched sync requests and pull changed files from the active node's
-read-only rclone WebDAV endpoint. A scheduled full sync is still useful as a
-safety net for missed events, agent restarts, or watch gaps.
+For the initial release, a volume has one active node and zero or more replica
+nodes. The active node serves the mounted PVC and watches configured durable
+paths. Replica agents receive batched sync requests and pull changed files from
+the active node's read-only rclone WebDAV endpoint. A scheduled full sync is
+still useful as a safety net for missed events, agent restarts, or watch gaps.
 
 ```mermaid
 flowchart TD
@@ -60,7 +60,8 @@ flowchart TD
 
 The default replica set is the set of healthy node-agent DaemonSet pods for the
 configured storage pool. Per-volume node constraints can be added later, but
-v0 should not require manually maintaining a node list for every volume.
+the initial release does not require manually maintaining a node list for every
+volume.
 
 Storage pool membership is operator-defined at install time through the
 node-agent DaemonSet's node selectors, affinity, and tolerations. Workloads that
@@ -83,11 +84,11 @@ of relying on a mutating admission webhook to infer and patch scheduling rules.
 Replication copies current state. Backups still need retention so a bad write,
 delete, or corrupt save does not simply replicate everywhere.
 
-Like Kubernetes `local-path` style storage, v0 records the requested PVC size
-but does not enforce it as a filesystem quota. The size is still useful for
-Kubernetes API shape, placement decisions, and operator visibility. Actual disk
-use is bounded by the backing local pool unless the host filesystem provides
-separate quota enforcement.
+Like Kubernetes `local-path` style storage, `simple-volume` records the
+requested PVC size but does not enforce it as a filesystem quota. The size is
+still useful for Kubernetes API shape, placement decisions, and operator
+visibility. Actual disk use is bounded by the backing local pool unless the
+host filesystem provides separate quota enforcement.
 
 ## Why CSI At All
 
@@ -140,9 +141,9 @@ path; webhook-based injection can wait until there is a clear need.
 | --- | --- | --- |
 | VolSync | Tried as a PVC copy primitive, not selected as the main abstraction. | VolSync can copy PVC data, but it does not provide the freshness-aware promotion, fencing, active-node scheduling, or single-writer policy this project needs. |
 | Longhorn | Strongest tested alternative, but not selected for these workloads. | Longhorn solves a broader replicated block-storage problem, but it added many containers to already resource-constrained nodes. Our target is local hot writes with async recovery, not a heavier synchronous storage platform in the hot path. |
-| OpenEBS | Ruled out before POC. | LocalPV still leaves us to build promotion/freshness/rescheduling policy, while replicated OpenEBS engines add another storage platform to operate. For this use case, most of that surface area is overkill. |
-| Ceph/Rook | Ruled out before POC. | Ceph solves distributed storage, but the operational footprint is too high for this use case and it moves game/runtime state into a general cluster storage layer. |
-| `simple-volume` | Selected v0 direction. | It keeps the hot path local, uses PVC/CSI for Kubernetes integration, delegates byte movement to rclone/WebDAV agents, and makes freshness-gated promotion explicit. The model is ongoing backup plus automatic failover to the freshest acceptable copy on another node, which is lightweight and covers the fundamental recovery features for many single-writer workloads. |
+| OpenEBS | Ruled out before implementation. | LocalPV still leaves us to build promotion/freshness/rescheduling policy, while replicated OpenEBS engines add another storage platform to operate. For this use case, most of that surface area is overkill. |
+| Ceph/Rook | Ruled out before implementation. | Ceph solves distributed storage, but the operational footprint is too high for this use case and it moves game/runtime state into a general cluster storage layer. |
+| `simple-volume` | Selected release direction. | It keeps the hot path local, uses PVC/CSI for Kubernetes integration, delegates byte movement to rclone/WebDAV agents, and makes freshness-gated promotion explicit. The model is ongoing backup plus automatic failover to the freshest acceptable copy on another node, which is lightweight and covers the fundamental recovery features for many single-writer workloads. |
 
 ## Workloads That Fit
 
@@ -164,3 +165,37 @@ For game servers such as Enshrouded, the intended shape is to replicate saves
 and config while excluding reconstructable downloads. That keeps the watch path
 small and makes failover data movement proportional to durable state rather
 than the full installed game tree.
+
+## Resource Model
+
+The default resource profile should favor reliability and a low memory footprint
+over raw copy speed. This matters for the clusters this project targets: a
+storage layer that only works comfortably on large nodes misses the point of a
+small local-volume controller.
+
+The node agent therefore runs rclone conservatively for replication work:
+
+- one transfer
+- one checker
+- no explicit transfer buffer
+- no multi-threaded stream copying
+
+Those defaults intentionally make large copies slower. Operators can trade
+memory for throughput later by raising both the agent memory limit and the
+rclone concurrency/buffer settings once those settings are exposed. Raising the
+memory limit by itself only prevents OOMs; it does not make a single-transfer
+sync faster.
+
+Full 1:1 seeding and migration copies are not representative of normal
+replication. They walk the entire root, often including game binaries, Proton or
+Wine runtimes, logs, cache trees, and historical backups. On Kubernetes, memory
+reported for that pod can include kernel page cache from the file copy plus
+rclone's directory/check bookkeeping, so a broad seed can appear much larger
+than steady-state scoped replication even when file contents are streamed.
+
+The expected operating model is:
+
+- keep steady-state replication scoped to durable paths such as saves and config
+- exclude reconstructable game/runtime downloads from the hot watch path
+- use larger temporary resource limits for deliberate one-time full-volume seeds
+- keep the default agent profile small enough for resource-constrained nodes

@@ -1,7 +1,7 @@
 # Simple Volume E2E Deployment Tasks
 
-This is the implementation checklist to get `simple-volume` from the current
-V0 scaffold to a cluster-tested E2E flow.
+This is the implementation checklist that moved `simple-volume` from scaffold
+to a cluster-tested E2E flow. The current release gate is `v0.2.0`.
 
 ## 1. Publish The Image
 
@@ -9,7 +9,8 @@ V0 scaffold to a cluster-tested E2E flow.
 - Confirm `.github/workflows/publish-images.yml` publishes
   `ghcr.io/shipstuff/simple-volume:sha-<sha>` on the `main` push.
 - Use the `sha-<sha>` tag for first cluster installs.
-- Cut `v0.1.0` only after the CSI smoke test passes.
+- Cut `v0.2.0` only after local checks, image/chart publish workflows, and the
+  Windrose canary two-leg fire drill pass.
 
 ## 2. Define A Safe Test Pool
 
@@ -74,7 +75,7 @@ kubectl exec deploy/simple-volume-demo -- sh -c 'echo ok >> /data/e2e.txt && cat
   source agent's read-only WebDAV endpoint.
 - Add cron-style off-hours full resync from the controller as a safety net,
   using `sync.fullResyncSchedule` such as `0 4 * * *`; do not create one
-  Kubernetes CronJob per volume in V0.
+  Kubernetes CronJob per volume.
 - Make CSI node authorization read the controller/volume status instead of the
   current local static authorization scaffold.
 - Add per-volume node labels for active/healthy scheduling.
@@ -90,7 +91,7 @@ kubectl exec deploy/simple-volume-demo -- sh -c 'echo ok >> /data/e2e.txt && cat
   local copy under `.simple-volume-backups/`, restores from the promoted leader,
   and remains a replica unless an explicit move-back is requested.
 
-Recommended V0 replication policy shape:
+Recommended replication policy shape:
 
 ```yaml
 sync:
@@ -110,7 +111,7 @@ save/config state and reconstructable game files.
 
 ## 6. Release Gate
 
-Before tagging `v0.1.0`, all of these should pass:
+Before tagging `v0.2.0`, all of these should pass:
 
 ```bash
 go test ./...
@@ -126,3 +127,5 @@ And in-cluster:
 - demo PVC binds.
 - demo pod mounts and writes data.
 - non-empty uninitialized pool adoption fails by default.
+- Windrose canary two-leg failover completes with confirmed post-promotion full
+  sync and watch restart on each promoted active node.

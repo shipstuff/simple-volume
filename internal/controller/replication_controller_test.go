@@ -37,6 +37,8 @@ func TestDesiredReplicationsDiscoversActiveAndReplicaAgents(t *testing.T) {
 					AnnotationReplicationEnabled: "true",
 					AnnotationIncludePaths:       "writes.log, saves/**",
 					AnnotationExcludePaths:       "downloads/**",
+					AnnotationPruneExcluded:      "true",
+					AnnotationRequiredPaths:      "saves/world",
 					AnnotationDebounce:           "2s",
 					AnnotationFullSyncOnStart:    "true",
 					AnnotationFullSyncSchedule:   "0 4 * * *",
@@ -79,8 +81,17 @@ func TestDesiredReplicationsDiscoversActiveAndReplicaAgents(t *testing.T) {
 	if got.IncludePaths[0] != "writes.log" || got.IncludePaths[1] != "saves/**" {
 		t.Fatalf("include paths = %#v", got.IncludePaths)
 	}
+	if len(got.RequiredPaths) != 1 || got.RequiredPaths[0] != "saves/world" {
+		t.Fatalf("required paths = %#v", got.RequiredPaths)
+	}
+	if !got.PruneExcluded {
+		t.Fatalf("prune excluded = false")
+	}
 	if !got.FullSync || got.FullSchedule != "0 4 * * *" || got.Debounce != "2s" {
 		t.Fatalf("sync policy = %#v", got)
+	}
+	if got.ConsistencyMode != agent.ConsistencyModeShadow || got.ConfirmedReplicas != 1 {
+		t.Fatalf("consistency policy = %#v", got)
 	}
 }
 
@@ -184,6 +195,23 @@ func TestReconcileOneStartsWatchAndRunsStartupFullSyncOnce(t *testing.T) {
 	var watchStarts atomic.Int32
 	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/replication/shadow/prepare":
+			var req agent.ShadowPrepareRequest
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode shadow request: %v", err)
+			}
+			if req.Volume != "pvc-123" || len(req.RequiredPaths) != 1 || req.RequiredPaths[0] != "saves/world" {
+				t.Fatalf("shadow request = %#v", req)
+			}
+			if !req.PruneExcluded {
+				t.Fatalf("shadow prune excluded = false")
+			}
+			_ = json.NewEncoder(w).Encode(agent.ShadowPrepareResponse{
+				Volume:         req.Volume,
+				SourceBasePath: ".simple-volume-shadows/default/pvc-123/current/data",
+				Generation:     "g1",
+				OK:             true,
+			})
 		case "/replication/watch/start":
 			watchStarts.Add(1)
 			var req agent.WatchStartRequest
@@ -196,6 +224,9 @@ func TestReconcileOneStartsWatchAndRunsStartupFullSyncOnce(t *testing.T) {
 			if req.Ownership.UID == nil || *req.Ownership.UID != 10000 {
 				t.Fatalf("watch ownership = %#v", req.Ownership)
 			}
+			if req.ConsistencyMode != agent.ConsistencyModeShadow || req.ConfirmedReplicas == nil || *req.ConfirmedReplicas != 1 {
+				t.Fatalf("watch consistency = %#v confirmed=%#v", req.ConsistencyMode, req.ConfirmedReplicas)
+			}
 			_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
 		case "/replication/watch/status":
 			_ = json.NewEncoder(w).Encode(map[string]bool{"running": true})
@@ -206,9 +237,16 @@ func TestReconcileOneStartsWatchAndRunsStartupFullSyncOnce(t *testing.T) {
 	defer source.Close()
 
 	var fullSyncs atomic.Int32
+	var stopCalls atomic.Int32
 	target := func() *httptest.Server {
 		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != "/replication/full-sync" {
+			switch r.URL.Path {
+			case "/replication/full-sync":
+			case "/replication/watch/stop":
+				stopCalls.Add(1)
+				http.Error(w, "watch not found", http.StatusNotFound)
+				return
+			default:
 				t.Fatalf("target path = %s", r.URL.Path)
 			}
 			var req agent.FullSyncRequest
@@ -217,6 +255,15 @@ func TestReconcileOneStartsWatchAndRunsStartupFullSyncOnce(t *testing.T) {
 			}
 			if req.Ownership.UID == nil || *req.Ownership.UID != 10000 {
 				t.Fatalf("full-sync ownership = %#v", req.Ownership)
+			}
+			if len(req.RequiredPaths) != 1 || req.RequiredPaths[0] != "saves/world" {
+				t.Fatalf("full-sync required paths = %#v", req.RequiredPaths)
+			}
+			if req.SourceBasePath != ".simple-volume-shadows/default/pvc-123/current/data" {
+				t.Fatalf("full-sync source base = %q", req.SourceBasePath)
+			}
+			if !req.PruneExcluded {
+				t.Fatalf("full-sync prune excluded = false")
 			}
 			fullSyncs.Add(1)
 			_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
@@ -238,13 +285,17 @@ func TestReconcileOneStartsWatchAndRunsStartupFullSyncOnce(t *testing.T) {
 			{Node: "sf-west-1", Ref: agent.TargetRef{URL: targetA.URL, Token: "secret"}},
 			{Node: "fresno-west-1", Ref: agent.TargetRef{URL: targetB.URL, Token: "secret"}},
 		},
-		IncludePaths: []string{"writes.log"},
+		IncludePaths:  []string{"writes.log"},
+		RequiredPaths: []string{"saves/world"},
+		PruneExcluded: true,
 		Ownership: agent.OwnershipPolicy{
 			UID: int64Ptr(10000),
 			GID: int64Ptr(10000),
 		},
-		Debounce: "2s",
-		FullSync: true,
+		Debounce:          "2s",
+		FullSync:          true,
+		ConsistencyMode:   agent.ConsistencyModeShadow,
+		ConfirmedReplicas: 1,
 	}
 
 	if err := controller.reconcileOne(context.Background(), desired, "secret", time.Date(2026, 6, 15, 3, 0, 0, 0, time.UTC)); err != nil {
@@ -280,6 +331,76 @@ func TestReconcileOneStartsWatchAndRunsStartupFullSyncOnce(t *testing.T) {
 	if got := fullSyncs.Load(); got != 2 {
 		t.Fatalf("fullSyncs = %d, want 2", got)
 	}
+	if got := stopCalls.Load(); got != 2 {
+		t.Fatalf("stopCalls = %d, want one stale watch stop per target", got)
+	}
+}
+
+func TestReconcileOneRunsStartupFullSyncAgainAfterActiveNodeChanges(t *testing.T) {
+	sourceA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/replication/watch/start":
+			_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+		case "/replication/watch/status":
+			_ = json.NewEncoder(w).Encode(map[string]bool{"running": true})
+		default:
+			t.Fatalf("sourceA path = %s", r.URL.Path)
+		}
+	}))
+	defer sourceA.Close()
+	sourceB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/replication/watch/start":
+			_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+		case "/replication/watch/status":
+			_ = json.NewEncoder(w).Encode(map[string]bool{"running": true})
+		default:
+			t.Fatalf("sourceB path = %s", r.URL.Path)
+		}
+	}))
+	defer sourceB.Close()
+
+	var fullSyncs atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/replication/full-sync":
+			fullSyncs.Add(1)
+			_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+		case "/replication/watch/stop":
+			http.Error(w, "watch not found", http.StatusNotFound)
+		default:
+			t.Fatalf("target path = %s", r.URL.Path)
+		}
+	}))
+	defer target.Close()
+
+	controller := NewReplicationController(nil, ReplicationControllerConfig{})
+	desired := DesiredReplication{
+		Namespace:  "default",
+		ClaimName:  "data",
+		Volume:     "pvc-123",
+		ActiveNode: "sf-west-1",
+		SourceURL:  sourceA.URL,
+		Targets: []DesiredTarget{
+			{Node: "fresno-west-1", Ref: agent.TargetRef{URL: target.URL, Token: "secret"}},
+		},
+		FullSync: true,
+	}
+
+	if err := controller.reconcileOne(context.Background(), desired, "secret", time.Date(2026, 6, 15, 3, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("first reconcileOne returned error: %v", err)
+	}
+	waitFor(t, time.Second, func() bool { return fullSyncs.Load() == 1 })
+
+	desired.ActiveNode = "fresno-west-1"
+	desired.SourceURL = sourceB.URL
+	desired.Targets = []DesiredTarget{
+		{Node: "sf-west-1", Ref: agent.TargetRef{URL: target.URL, Token: "secret"}},
+	}
+	if err := controller.reconcileOne(context.Background(), desired, "secret", time.Date(2026, 6, 15, 3, 1, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("second reconcileOne returned error: %v", err)
+	}
+	waitFor(t, time.Second, func() bool { return fullSyncs.Load() == 2 })
 }
 
 func TestReconcileRunsFailoverBeforeReplicationTokenLookup(t *testing.T) {

@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"reflect"
@@ -10,9 +11,11 @@ import (
 	"sync"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 )
 
@@ -129,17 +132,31 @@ func (c *FailoverController) reconcilePVC(ctx context.Context, pvc *corev1.Persi
 	demoted := c.demotedForPVC(pvc)
 	requests := failoverWorkloadRequests(usingClaim)
 	candidates := failoverCandidates(usingClaim, agents, readyNodes, freshness, demoted, failoverMaxStaleness(pvc), now, requests, available)
+	hasDemand, err := c.claimHasDesiredConsumer(ctx, pvc, usingClaim)
+	if err != nil {
+		return err
+	}
 	activeNode := healthyClaimPodNode(usingClaim, readyNodes)
 	if activeNode == "" {
 		activeNode = strings.TrimSpace(pvc.Annotations[AnnotationActiveNode])
 	}
+	if activeNode == "" {
+		activeNode = strings.TrimSpace(pvc.Annotations[AnnotationSelectedNode])
+	}
+	if activeNode == "" && hasDemand {
+		activeNode = initialActiveNode(agents, readyNodes, failoverNodePriority(pvc), requests, available)
+	}
 	if activeNode != "" {
-		if err := c.promoteStorageState(ctx, pvc, activeNode, ""); err != nil {
+		if err := c.recordActiveNode(ctx, pvc, activeNode, ""); err != nil {
 			return err
 		}
 	}
 	if err := c.reconcileNodeLabels(ctx, pvc, activeNode, candidates); err != nil {
 		return err
+	}
+	if !hasDemand {
+		delete(c.seen, pvcKey(pvc))
+		return nil
 	}
 	if hasHealthyClaimPod(usingClaim, readyNodes) {
 		delete(c.seen, pvcKey(pvc))
@@ -169,7 +186,7 @@ func (c *FailoverController) reconcilePVC(ctx context.Context, pvc *corev1.Persi
 		return err
 	}
 	for _, pod := range usingClaim {
-		if pod.Spec.NodeName == decision.TargetNode {
+		if pod.Spec.NodeName == "" || pod.Spec.NodeName == decision.TargetNode {
 			continue
 		}
 		c.recordDemoted(pvc, pod.Spec.NodeName)
@@ -180,6 +197,69 @@ func (c *FailoverController) reconcilePVC(ctx context.Context, pvc *corev1.Persi
 	log.Printf("promoted pvc %s/%s to node %s", pvc.Namespace, pvc.Name, decision.TargetNode)
 	delete(c.seen, pvcKey(pvc))
 	return nil
+}
+
+func initialActiveNode(agents map[string]corev1.Pod, readyNodes map[string]bool, priority []string, requests corev1.ResourceList, available map[string]corev1.ResourceList) string {
+	for _, node := range priority {
+		if _, ok := agents[node]; ok && readyNodes[node] && nodeFitsRequests(node, requests, available) {
+			return node
+		}
+	}
+	nodes := make([]string, 0, len(agents))
+	for node := range agents {
+		if readyNodes[node] && nodeFitsRequests(node, requests, available) {
+			nodes = append(nodes, node)
+		}
+	}
+	sort.Strings(nodes)
+	if len(nodes) == 0 {
+		return ""
+	}
+	return nodes[0]
+}
+
+func (c *FailoverController) claimHasDesiredConsumer(ctx context.Context, pvc *corev1.PersistentVolumeClaim, usingClaim []corev1.Pod) (bool, error) {
+	if len(usingClaim) > 0 {
+		return true, nil
+	}
+	deployments, err := c.client.AppsV1().Deployments(pvc.Namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return false, err
+	}
+	for _, deployment := range deployments.Items {
+		if desiredReplicas(deployment.Spec.Replicas, 1) > 0 && podTemplateUsesClaim(deployment.Spec.Template, pvc.Name) {
+			return true, nil
+		}
+	}
+	statefulSets, err := c.client.AppsV1().StatefulSets(pvc.Namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return false, err
+	}
+	for _, statefulSet := range statefulSets.Items {
+		if desiredReplicas(statefulSet.Spec.Replicas, 1) > 0 &&
+			(podTemplateUsesClaim(statefulSet.Spec.Template, pvc.Name) || statefulSetVolumeClaimMatches(statefulSet, pvc.Name)) {
+			return true, nil
+		}
+	}
+	replicaSets, err := c.client.AppsV1().ReplicaSets(pvc.Namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return false, err
+	}
+	for _, replicaSet := range replicaSets.Items {
+		if desiredReplicas(replicaSet.Spec.Replicas, 1) > 0 && podTemplateUsesClaim(replicaSet.Spec.Template, pvc.Name) {
+			return true, nil
+		}
+	}
+	daemonSets, err := c.client.AppsV1().DaemonSets(pvc.Namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return false, err
+	}
+	for _, daemonSet := range daemonSets.Items {
+		if podTemplateUsesClaim(daemonSet.Spec.Template, pvc.Name) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func SelectFailoverTarget(pods []corev1.Pod, agents map[string]corev1.Pod, readyNodes map[string]bool, freshness map[string]ReplicaFreshness, maxStaleness time.Duration, now time.Time) FailoverDecision {
@@ -240,6 +320,13 @@ func failoverCandidates(pods []corev1.Pod, agents map[string]corev1.Pod, readyNo
 	return candidates
 }
 
+func (c *FailoverController) recordActiveNode(ctx context.Context, pvc *corev1.PersistentVolumeClaim, targetNode, previousActive string) error {
+	if pvc.Spec.VolumeName == "" {
+		return c.promotePVCState(ctx, pvc, targetNode, previousActive)
+	}
+	return c.promoteStorageState(ctx, pvc, targetNode, previousActive)
+}
+
 func (c *FailoverController) promoteStorageState(ctx context.Context, pvc *corev1.PersistentVolumeClaim, targetNode, previousActive string) error {
 	if pvc.Spec.VolumeName == "" {
 		return fmt.Errorf("pvc %s/%s has no bound volume", pvc.Namespace, pvc.Name)
@@ -262,6 +349,10 @@ func (c *FailoverController) promoteStorageState(ctx context.Context, pvc *corev
 		}
 	}
 
+	return c.promotePVCState(ctx, pvc, targetNode, previousActive)
+}
+
+func (c *FailoverController) promotePVCState(ctx context.Context, pvc *corev1.PersistentVolumeClaim, targetNode, previousActive string) error {
 	latestPVC, err := c.client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Get(ctx, pvc.Name, metav1.GetOptions{})
 	if err != nil {
 		return err
@@ -299,24 +390,37 @@ func (c *FailoverController) reconcileNodeLabels(ctx context.Context, pvc *corev
 		candidateNodes[candidate.Node] = true
 	}
 	for _, node := range nodes.Items {
-		updated := node.DeepCopy()
-		if updated.Labels == nil {
-			updated.Labels = make(map[string]string)
-		}
+		patchLabels := make(map[string]any)
 		if node.Name == activeNode && activeNode != "" {
-			updated.Labels[roleLabel] = "active"
+			if node.Labels[roleLabel] != "active" {
+				patchLabels[roleLabel] = "active"
+			}
 		} else {
-			delete(updated.Labels, roleLabel)
+			if _, ok := node.Labels[roleLabel]; ok {
+				patchLabels[roleLabel] = nil
+			}
 		}
 		if candidateNodes[node.Name] {
-			updated.Labels[candidateLabel] = "true"
+			if node.Labels[candidateLabel] != "true" {
+				patchLabels[candidateLabel] = "true"
+			}
 		} else {
-			delete(updated.Labels, candidateLabel)
+			if _, ok := node.Labels[candidateLabel]; ok {
+				patchLabels[candidateLabel] = nil
+			}
 		}
-		if reflect.DeepEqual(node.Labels, updated.Labels) {
+		if len(patchLabels) == 0 {
 			continue
 		}
-		if _, err := c.client.CoreV1().Nodes().Update(ctx, updated, metav1.UpdateOptions{}); err != nil {
+		patch, err := json.Marshal(map[string]any{
+			"metadata": map[string]any{
+				"labels": patchLabels,
+			},
+		})
+		if err != nil {
+			return err
+		}
+		if _, err := c.client.CoreV1().Nodes().Patch(ctx, node.Name, types.MergePatchType, patch, metav1.PatchOptions{}); err != nil {
 			return err
 		}
 	}
@@ -439,6 +543,39 @@ func podsUsingClaim(pods []corev1.Pod, claim string) []corev1.Pod {
 		}
 	}
 	return out
+}
+
+func podTemplateUsesClaim(template corev1.PodTemplateSpec, claim string) bool {
+	return podSpecUsesClaim(template.Spec, claim)
+}
+
+func podSpecUsesClaim(spec corev1.PodSpec, claim string) bool {
+	for _, volume := range spec.Volumes {
+		if volume.PersistentVolumeClaim != nil && volume.PersistentVolumeClaim.ClaimName == claim {
+			return true
+		}
+	}
+	return false
+}
+
+func statefulSetVolumeClaimMatches(statefulSet appsv1.StatefulSet, claim string) bool {
+	for _, template := range statefulSet.Spec.VolumeClaimTemplates {
+		if template.Name == claim {
+			return true
+		}
+		prefix := template.Name + "-" + statefulSet.Name + "-"
+		if strings.HasPrefix(claim, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func desiredReplicas(replicas *int32, defaultValue int32) int32 {
+	if replicas == nil {
+		return defaultValue
+	}
+	return *replicas
 }
 
 func hasHealthyClaimPod(pods []corev1.Pod, readyNodes map[string]bool) bool {

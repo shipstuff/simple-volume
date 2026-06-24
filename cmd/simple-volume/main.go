@@ -48,6 +48,7 @@ func runController(args []string) {
 	tokenSecretName := fs.String("sync-token-secret-name", getenv("SIMPLE_VOLUME_TOKEN_SECRET_NAME", "simple-volume-sync-token"), "secret containing the agent sync token")
 	tokenSecretKey := fs.String("sync-token-secret-key", getenv("SIMPLE_VOLUME_TOKEN_SECRET_KEY", "token"), "secret key containing the agent sync token")
 	reconcileInterval := fs.Duration("reconcile-interval", 30*time.Second, "replication reconcile interval")
+	failoverTimeout := fs.Duration("failover-timeout", 10*time.Second, "maximum time to spend on failover reconciliation before continuing replication")
 	_ = fs.Parse(args)
 	log.Printf("starting simple-volume controller driver=%s addr=%s replication=%t", v1alpha1.DriverName, *addr, *enableReplication)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -63,6 +64,7 @@ func runController(args []string) {
 		TokenSecretName:   *tokenSecretName,
 		TokenSecretKey:    *tokenSecretKey,
 		ReconcileInterval: *reconcileInterval,
+		FailoverTimeout:   *failoverTimeout,
 	})
 	if err != nil && err != context.Canceled {
 		log.Fatalf("replication controller: %v", err)
@@ -131,6 +133,8 @@ func runAgent(args []string) {
 	})
 	mux.HandleFunc("/replication/sync-batch", agent.SyncBatchHandler(pool, auth, agent.ExecRunner{}, 10*time.Minute, replicationLocks))
 	mux.HandleFunc("/replication/full-sync", agent.FullSyncHandler(pool, auth, agent.ExecRunner{}, time.Hour, replicationLocks))
+	mux.HandleFunc("/replication/shadow/prepare", agent.ShadowPrepareHandler(pool, auth, agent.ExecRunner{}, time.Hour, replicationLocks))
+	mux.HandleFunc("/replication/archive", agent.ArchiveHandler(pool, auth))
 	mux.HandleFunc("/replication/watch/start", watchManager.StartHandler(auth))
 	mux.HandleFunc("/replication/watch/stop", watchManager.StopHandler(auth))
 	mux.HandleFunc("/replication/watch/status", watchManager.StatusHandler(auth))
