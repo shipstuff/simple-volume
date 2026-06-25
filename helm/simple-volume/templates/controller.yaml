@@ -52,6 +52,27 @@ spec:
               port: http
           resources:
             {{- toYaml .Values.controller.resources | nindent 12 }}
+        {{- if .Values.rbacProxy.enabled }}
+        - name: kube-rbac-proxy
+          image: {{ .Values.rbacProxy.image }}
+          args:
+            - --insecure-listen-address={{ .Values.rbacProxy.listenAddress }}
+            - --upstream={{ .Values.rbacProxy.upstream }}
+            - --config-file=/etc/kube-rbac-proxy/config-file.yaml
+            - --auth-header-fields-enabled=true
+            - --allow-paths=/replication/full-sync/trigger
+            - --logtostderr=true
+          ports:
+            - name: rbac-proxy
+              containerPort: 8082
+          volumeMounts:
+            - name: rbac-proxy-config
+              mountPath: /etc/kube-rbac-proxy
+          securityContext:
+            allowPrivilegeEscalation: false
+          resources:
+            {{- toYaml .Values.rbacProxy.resources | nindent 12 }}
+        {{- end }}
         - name: csi-controller
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
@@ -79,3 +100,8 @@ spec:
       volumes:
         - name: csi-socket
           emptyDir: {}
+        {{- if .Values.rbacProxy.enabled }}
+        - name: rbac-proxy-config
+          configMap:
+            name: {{ include "simple-volume.fullname" . }}-rbac-proxy
+        {{- end }}

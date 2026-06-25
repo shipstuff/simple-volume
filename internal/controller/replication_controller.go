@@ -91,6 +91,21 @@ type DesiredReplication struct {
 	ConfirmedReplicas int
 }
 
+type ManualFullSyncRequest struct {
+	Namespace string `json:"namespace"`
+	ClaimName string `json:"claimName"`
+}
+
+type ManualFullSyncResponse struct {
+	Namespace  string `json:"namespace"`
+	ClaimName  string `json:"claimName"`
+	Volume     string `json:"volume,omitempty"`
+	ActiveNode string `json:"activeNode,omitempty"`
+	Targets    int    `json:"targets,omitempty"`
+	Started    bool   `json:"started"`
+	Reason     string `json:"reason"`
+}
+
 func NewReplicationController(client kubernetes.Interface, cfg ReplicationControllerConfig) *ReplicationController {
 	if cfg.Namespace == "" {
 		cfg.Namespace = "simple-volume-system"
@@ -132,15 +147,23 @@ func NewReplicationController(client kubernetes.Interface, cfg ReplicationContro
 }
 
 func RunReplicationController(ctx context.Context, cfg ReplicationControllerConfig) error {
+	controller, err := NewInClusterReplicationController(cfg)
+	if err != nil {
+		return err
+	}
+	return controller.Run(ctx)
+}
+
+func NewInClusterReplicationController(cfg ReplicationControllerConfig) (*ReplicationController, error) {
 	restConfig, err := rest.InClusterConfig()
 	if err != nil {
-		return fmt.Errorf("load in-cluster config: %w", err)
+		return nil, fmt.Errorf("load in-cluster config: %w", err)
 	}
 	client, err := kubernetes.NewForConfig(restConfig)
 	if err != nil {
-		return fmt.Errorf("create kubernetes client: %w", err)
+		return nil, fmt.Errorf("create kubernetes client: %w", err)
 	}
-	return NewReplicationController(client, cfg).Run(ctx)
+	return NewReplicationController(client, cfg), nil
 }
 
 func (c *ReplicationController) Run(ctx context.Context) error {
@@ -188,6 +211,59 @@ func (c *ReplicationController) Reconcile(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (c *ReplicationController) TriggerFullSync(ctx context.Context, namespace, claimName string) (ManualFullSyncResponse, error) {
+	namespace = strings.TrimSpace(namespace)
+	claimName = strings.TrimSpace(claimName)
+	if namespace == "" || claimName == "" {
+		return ManualFullSyncResponse{}, fmt.Errorf("namespace and claimName are required")
+	}
+	token, err := c.syncToken(ctx)
+	if err != nil {
+		return ManualFullSyncResponse{}, err
+	}
+	desired, err := c.DesiredReplications(ctx, token)
+	if err != nil {
+		return ManualFullSyncResponse{}, err
+	}
+	for _, item := range desired {
+		if item.Namespace != namespace || item.ClaimName != claimName {
+			continue
+		}
+		key := item.Namespace + "/" + item.Volume
+		epoch := c.noteActiveNode(key, item.ActiveNode)
+		syncKey := key + ":manual"
+		resp := ManualFullSyncResponse{
+			Namespace:  item.Namespace,
+			ClaimName:  item.ClaimName,
+			Volume:     item.Volume,
+			ActiveNode: item.ActiveNode,
+			Targets:    len(item.Targets),
+		}
+		if !c.tryStartVolumeFullSync(key, syncKey) {
+			resp.Started = false
+			resp.Reason = "already-running"
+			return resp, nil
+		}
+		now := time.Now()
+		log.Printf("starting manual full sync namespace=%s claim=%s volume=%s activeNode=%s targets=%d consistency=%s confirmedReplicas=%d",
+			item.Namespace, item.ClaimName, item.Volume, item.ActiveNode, len(item.Targets), item.ConsistencyMode, item.ConfirmedReplicas)
+		syncCtx := context.WithoutCancel(ctx)
+		go c.runFullSync(syncCtx, syncKey, item, token, now, func() {
+			if !c.isCurrentActiveEpoch(key, item.ActiveNode, epoch) {
+				log.Printf("discarded manual full sync completion for stale active epoch namespace=%s claim=%s volume=%s activeNode=%s",
+					item.Namespace, item.ClaimName, item.Volume, item.ActiveNode)
+				return
+			}
+			log.Printf("completed manual full sync namespace=%s claim=%s volume=%s targets=%d",
+				item.Namespace, item.ClaimName, item.Volume, len(item.Targets))
+		})
+		resp.Started = true
+		resp.Reason = "started"
+		return resp, nil
+	}
+	return ManualFullSyncResponse{}, fmt.Errorf("replication target %s/%s not found", namespace, claimName)
 }
 
 func (c *ReplicationController) DesiredReplications(ctx context.Context, token string) ([]DesiredReplication, error) {
@@ -288,7 +364,7 @@ func (c *ReplicationController) reconcileOne(ctx context.Context, desired Desire
 		done := c.completedSyncs[syncKey]
 		c.mu.Unlock()
 		if !done {
-			if c.tryStartFullSync(syncKey) {
+			if c.tryStartVolumeFullSync(key, syncKey) {
 				c.stopReplicaWatches(ctx, desired, token)
 				log.Printf("starting startup full sync namespace=%s claim=%s volume=%s activeNode=%s targets=%d consistency=%s confirmedReplicas=%d",
 					desired.Namespace, desired.ClaimName, desired.Volume, desired.ActiveNode, len(desired.Targets), desired.ConsistencyMode, desired.ConfirmedReplicas)
@@ -324,7 +400,7 @@ func (c *ReplicationController) reconcileOne(ctx context.Context, desired Desire
 		last := c.lastScheduledOn[scheduleKey]
 		c.mu.Unlock()
 		syncKey := scheduleKey + ":" + today
-		if last != today && c.tryStartFullSync(syncKey) {
+		if last != today && c.tryStartVolumeFullSync(key, syncKey) {
 			log.Printf("starting scheduled full sync namespace=%s claim=%s volume=%s activeNode=%s schedule=%q targets=%d consistency=%s confirmedReplicas=%d",
 				desired.Namespace, desired.ClaimName, desired.Volume, desired.ActiveNode, desired.FullSchedule, len(desired.Targets), desired.ConsistencyMode, desired.ConfirmedReplicas)
 			go c.runFullSync(ctx, syncKey, desired, token, now, func() {
@@ -408,11 +484,14 @@ func (c *ReplicationController) stopReplicaWatches(ctx context.Context, desired 
 	}
 }
 
-func (c *ReplicationController) tryStartFullSync(syncKey string) bool {
+func (c *ReplicationController) tryStartVolumeFullSync(volumeKey, syncKey string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.runningSyncs[syncKey] {
-		return false
+	prefix := volumeKey + ":"
+	for key := range c.runningSyncs {
+		if strings.HasPrefix(key, prefix) {
+			return false
+		}
 	}
 	c.runningSyncs[syncKey] = true
 	return true
@@ -605,16 +684,20 @@ func (c *ReplicationController) postJSONDecode(ctx context.Context, url, token s
 }
 
 func (c *ReplicationController) syncToken(ctx context.Context) (string, error) {
-	secret, err := c.client.CoreV1().Secrets(c.cfg.Namespace).Get(ctx, c.cfg.TokenSecretName, metav1.GetOptions{})
+	return c.secretToken(ctx, c.cfg.Namespace, c.cfg.TokenSecretName, c.cfg.TokenSecretKey, "sync token")
+}
+
+func (c *ReplicationController) secretToken(ctx context.Context, namespace, name, key, label string) (string, error) {
+	secret, err := c.client.CoreV1().Secrets(namespace).Get(ctx, name, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		return "", fmt.Errorf("sync token secret %s/%s not found", c.cfg.Namespace, c.cfg.TokenSecretName)
+		return "", fmt.Errorf("%s secret %s/%s not found", label, namespace, name)
 	}
 	if err != nil {
 		return "", err
 	}
-	token := strings.TrimSpace(string(secret.Data[c.cfg.TokenSecretKey]))
+	token := strings.TrimSpace(string(secret.Data[key]))
 	if token == "" {
-		return "", fmt.Errorf("sync token secret %s/%s key %s is empty", c.cfg.Namespace, c.cfg.TokenSecretName, c.cfg.TokenSecretKey)
+		return "", fmt.Errorf("%s secret %s/%s key %s is empty", label, namespace, name, key)
 	}
 	return token, nil
 }

@@ -1,0 +1,20 @@
+{{- if .Values.controller.service.create }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ default (printf "%s-controller" (include "simple-volume.fullname" .)) .Values.controller.service.name }}
+  namespace: {{ include "simple-volume.namespace" . }}
+  labels:
+    app.kubernetes.io/name: {{ include "simple-volume.name" . }}
+    app.kubernetes.io/component: controller
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  selector:
+    app.kubernetes.io/name: {{ include "simple-volume.name" . }}
+    app.kubernetes.io/component: controller
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: http
+      port: {{ .Values.controller.service.port }}
+      targetPort: {{ if .Values.rbacProxy.enabled }}rbac-proxy{{ else }}http{{ end }}
+{{- end }}

@@ -16,6 +16,12 @@ import (
 	"github.com/shipstuff/simple-volume/internal/agent"
 )
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
 func TestNewReplicationControllerDefaultsHTTPTimeoutToFullSyncWindow(t *testing.T) {
 	controller := NewReplicationController(fake.NewSimpleClientset(), ReplicationControllerConfig{})
 	if controller.cfg.HTTPTimeout != time.Hour {
@@ -333,6 +339,103 @@ func TestReconcileOneStartsWatchAndRunsStartupFullSyncOnce(t *testing.T) {
 	}
 	if got := stopCalls.Load(); got != 2 {
 		t.Fatalf("stopCalls = %d, want one stale watch stop per target", got)
+	}
+}
+
+func TestTriggerFullSyncStartsManualFullSyncForClaim(t *testing.T) {
+	storageClass := "simple-volume"
+	var fullSyncs atomic.Int32
+	sourceHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/replication/shadow/prepare" {
+			t.Fatalf("source path = %s", r.URL.Path)
+		}
+		var req agent.ShadowPrepareRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode shadow request: %v", err)
+		}
+		if req.Namespace != "default" || req.Volume != "pvc-123" {
+			t.Fatalf("shadow request = %#v", req)
+		}
+		_ = json.NewEncoder(w).Encode(agent.ShadowPrepareResponse{
+			Volume:         req.Volume,
+			SourceBasePath: ".simple-volume-shadows/default/pvc-123/current/data",
+			Generation:     "manual",
+			OK:             true,
+		})
+	})
+	targetHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/replication/full-sync" {
+			t.Fatalf("target path = %s", r.URL.Path)
+		}
+		var req agent.FullSyncRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode full-sync request: %v", err)
+		}
+		if req.SourceBasePath != ".simple-volume-shadows/default/pvc-123/current/data" {
+			t.Fatalf("source base = %q", req.SourceBasePath)
+		}
+		fullSyncs.Add(1)
+		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+	})
+	client := fake.NewSimpleClientset(
+		&corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "simple-volume-sync-token", Namespace: "simple-volume-system"},
+			Data:       map[string][]byte{"token": []byte("secret")},
+		},
+		&corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "data",
+				Namespace: "default",
+				Annotations: map[string]string{
+					AnnotationReplicationEnabled: "true",
+				},
+			},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				StorageClassName: &storageClass,
+				VolumeName:       "pvc-123",
+			},
+		},
+		workloadPod("writer", "default", "source-node", "data"),
+		agentPod("agent-source", "source-node", "source-agent"),
+		agentPod("agent-target-a", "target-a", "target-a"),
+		agentPod("agent-target-b", "target-b", "target-b"),
+	)
+	controller := NewReplicationController(client, ReplicationControllerConfig{
+		Namespace:        "simple-volume-system",
+		StorageClassName: storageClass,
+	})
+	controller.http = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		rec := httptest.NewRecorder()
+		switch req.URL.Host {
+		case "source-agent:8080":
+			sourceHandler.ServeHTTP(rec, req)
+		case "target-a:8080", "target-b:8080":
+			targetHandler.ServeHTTP(rec, req)
+		default:
+			t.Fatalf("unexpected host = %s", req.URL.Host)
+		}
+		return rec.Result(), nil
+	})}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	resp, err := controller.TriggerFullSync(ctx, "default", "data")
+	if err != nil {
+		t.Fatalf("TriggerFullSync returned error: %v", err)
+	}
+	cancel()
+	if !resp.Started || resp.Reason != "started" || resp.Volume != "pvc-123" || resp.Targets != 2 {
+		t.Fatalf("response = %#v", resp)
+	}
+	waitFor(t, time.Second, func() bool { return fullSyncs.Load() == 2 })
+}
+
+func TestTriggerFullSyncReportsAlreadyRunning(t *testing.T) {
+	controller := NewReplicationController(fake.NewSimpleClientset(), ReplicationControllerConfig{})
+	if !controller.tryStartVolumeFullSync("default/pvc-123", "default/pvc-123:scheduled") {
+		t.Fatal("expected first sync to start")
+	}
+	if controller.tryStartVolumeFullSync("default/pvc-123", "default/pvc-123:manual") {
+		t.Fatal("expected second sync for same volume to be rejected")
 	}
 }
 

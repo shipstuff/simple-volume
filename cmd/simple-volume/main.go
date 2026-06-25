@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -53,12 +55,12 @@ func runController(args []string) {
 	log.Printf("starting simple-volume controller driver=%s addr=%s replication=%t", v1alpha1.DriverName, *addr, *enableReplication)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	go serveHealth(*addr)
 	if !*enableReplication {
+		go serveHealth(*addr)
 		<-ctx.Done()
 		return
 	}
-	err := simplecontroller.RunReplicationController(ctx, simplecontroller.ReplicationControllerConfig{
+	controller, err := simplecontroller.NewInClusterReplicationController(simplecontroller.ReplicationControllerConfig{
 		Namespace:         *namespace,
 		StorageClassName:  *storageClass,
 		TokenSecretName:   *tokenSecretName,
@@ -66,9 +68,81 @@ func runController(args []string) {
 		ReconcileInterval: *reconcileInterval,
 		FailoverTimeout:   *failoverTimeout,
 	})
-	if err != nil && err != context.Canceled {
+	if err != nil {
 		log.Fatalf("replication controller: %v", err)
 	}
+	go func() {
+		if err := controller.Run(ctx); err != nil && err != context.Canceled {
+			log.Fatalf("replication controller: %v", err)
+		}
+	}()
+	if err := serveControllerHTTP(ctx, *addr, controller); err != nil && err != http.ErrServerClosed {
+		log.Fatalf("controller http: %v", err)
+	}
+}
+
+func serveControllerHTTP(ctx context.Context, addr string, controller *simplecontroller.ReplicationController) error {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok\n")) })
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok\n")) })
+	mux.HandleFunc("/replication/full-sync/trigger", manualFullSyncHandler(controller))
+	server := &http.Server{Addr: addr, Handler: mux}
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdownCtx)
+	}()
+	return server.ListenAndServe()
+}
+
+func manualFullSyncHandler(controller *simplecontroller.ReplicationController) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		var req simplecontroller.ManualFullSyncRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		queryNamespace := r.URL.Query().Get("namespace")
+		if queryNamespace == "" {
+			http.Error(w, "namespace query parameter is required", http.StatusBadRequest)
+			return
+		}
+		if req.Namespace == "" {
+			req.Namespace = queryNamespace
+		}
+		if queryNamespace != "" && req.Namespace != queryNamespace {
+			http.Error(w, "namespace query parameter must match request body", http.StatusBadRequest)
+			return
+		}
+		if !hasRBACProxyUser(r) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		resp, err := controller.TriggerFullSync(r.Context(), req.Namespace, req.ClaimName)
+		if err != nil {
+			status := http.StatusInternalServerError
+			if strings.Contains(err.Error(), "required") {
+				status = http.StatusBadRequest
+			} else if strings.Contains(err.Error(), "not found") {
+				status = http.StatusNotFound
+			}
+			http.Error(w, err.Error(), status)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		_ = json.NewEncoder(w).Encode(resp)
+	}
+}
+
+func hasRBACProxyUser(r *http.Request) bool {
+	user := strings.TrimSpace(r.Header.Get("X-Remote-User"))
+	return subtle.ConstantTimeCompare([]byte(user), []byte("")) == 0
 }
 
 func runAgent(args []string) {

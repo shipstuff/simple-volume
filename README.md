@@ -175,6 +175,63 @@ The current schedule parser intentionally supports exact minute/hour cron
 windows such as `0 4 * * *`; ranges and step expressions are left for the
 controller-runtime implementation.
 
+Workloads can also trigger a full sync during an application-defined safe
+window. This is useful when an application already knows the file tree is
+quiescent, such as after a game server empties, completes its own backup, and
+posts to Discord. The controller exposes a stable in-cluster webhook service.
+Access is authorized through Kubernetes RBAC by `kube-rbac-proxy`, using the
+caller pod's ServiceAccount token.
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: windrose-simple-volume-manual-sync
+  namespace: games
+rules:
+  - apiGroups: ["storage.shipstuff.io"]
+    resources: ["simplevolumes/manualsync"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: windrose-simple-volume-manual-sync
+  namespace: games
+subjects:
+  - kind: ServiceAccount
+    name: windrose
+    namespace: games
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: windrose-simple-volume-manual-sync
+```
+
+Then call the controller with the pod's ServiceAccount token and PVC identity:
+
+```bash
+TOKEN="$(cat /var/run/secrets/kubernetes.io/serviceaccount/token)"
+
+curl -fsS \
+  -X POST \
+  -H "Authorization: Bearer ${TOKEN}" \
+  -H "Content-Type: application/json" \
+  --data '{"namespace":"games","claimName":"windrose-canary-data-v3"}' \
+  'http://simple-volume-controller.simple-volume-system.svc:8080/replication/full-sync/trigger?namespace=games'
+```
+
+The response is `202 Accepted` once the controller has queued the full sync.
+If a full sync for the same volume is already running, the request is accepted
+with `started: false` and `reason: "already-running"`. The manual trigger uses
+the same include/exclude paths, shadow consistency, required paths, ownership,
+and confirmed-replica policy as scheduled full syncs.
+
+The RBAC check is namespace scoped. A Role grants a ServiceAccount permission
+to trigger manual syncs for simple-volume claims in that namespace. Keep
+ServiceAccounts scoped per workload if different workloads in the same
+namespace should not share this permission.
+
 Opt-in automatic failover is PVC annotation driven:
 
 ```yaml

@@ -1,0 +1,23 @@
+{{- if .Values.rbacProxy.enabled }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "simple-volume.fullname" . }}-rbac-proxy
+  namespace: {{ include "simple-volume.namespace" . }}
+  labels:
+    app.kubernetes.io/name: {{ include "simple-volume.name" . }}
+    app.kubernetes.io/component: controller
+    app.kubernetes.io/instance: {{ .Release.Name }}
+data:
+  config-file.yaml: |
+    authorization:
+      rewrites:
+        byQueryParameter:
+          name: namespace
+      resourceAttributes:
+        namespace: {{ "{{ .Value }}" | quote }}
+        apiGroup: storage.shipstuff.io
+        apiVersion: v1alpha1
+        resource: simplevolumes
+        subresource: manualsync
+{{- end }}
