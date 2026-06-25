@@ -7,7 +7,7 @@ const (
 	Version = "v1alpha1"
 
 	DriverName    = "simple-volume.shipstuff.io"
-	DriverVersion = "0.2.0"
+	DriverVersion = "0.3.0"
 )
 
 type VolumePhase string
